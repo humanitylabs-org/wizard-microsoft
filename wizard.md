@@ -6,7 +6,7 @@ type: external
 category: system
 version: 0.1.0
 summary: Connect Outlook mail and calendar. Quick connect through Composio, or your own Microsoft app; several accounts.
-tags: [mail, calendar]
+tags: [communication, productivity]
 license: GPL-3.0-only
 source: https://github.com/oscarhenrycollins/wizard-microsoft
 runtime:
