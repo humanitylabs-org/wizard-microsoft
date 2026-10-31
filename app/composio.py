@@ -422,9 +422,22 @@ class SignIn:
         """The project API key for the signed-in Composio account (read or minted once). Never returns the user key.
 
         Mirrors the Composio CLI: session/info by user key, then again scoped to its org and project, then mint."""
+        # A sign-in started with scope 'project' (the owner picks a project on Composio's page) can hand back
+        # the project's own key (ak_...) rather than a user key (uak_...): use it as is when Composio takes it.
+        self._log('linked_key_kind uak=%s' % user_key.startswith('uak_'), 0)
+        if not user_key.startswith('uak_') and self._works(user_key, tries=3):
+            return user_key
         auth = {**self.CLI_HEADERS, 'x-user-api-key': user_key}
         status, info = self._call('GET', '/api/v3.1/auth/session/info', headers=auth)
         self._log('session_info', status, info)
+        if status in (401, 403) and user_key.startswith('uak_'):
+            # Brand-new user keys can lag a few seconds behind the sign-in.
+            for wait in (2, 4, 6):
+                self.sleep(wait)
+                status, info = self._call('GET', '/api/v3.1/auth/session/info', headers=auth)
+                self._log('session_info_retry', status, info)
+                if status < 400:
+                    break
         if status >= 400:
             raise _error(status, info)
         project = info.get('project') if isinstance(info.get('project'), dict) else {}
