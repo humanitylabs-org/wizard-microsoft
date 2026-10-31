@@ -27,6 +27,7 @@ from pathlib import Path
 
 import composio
 import graph
+from agent_access import AgentAccess, AccessRefused
 
 LOGIN = 'https://login.microsoftonline.com'
 SCOPES = ['offline_access', 'openid', 'email', 'profile', 'User.Read', 'Mail.ReadWrite', 'Mail.Send', 'Calendars.ReadWrite']
@@ -164,6 +165,8 @@ class Service:
     def __init__(self, data_dir, *, http=None, composio_transport=None, clock=time.time):
         self.store = Store(data_dir)
         self.state = self.store.load()
+        # The owner's choice of what agents may do with mail (Mail > Settings > Agent access). Draft only by default.
+        self.access = AgentAccess(data_dir)
         self.http = http or Http()
         self.composio_transport = composio_transport
         self.clock = clock
@@ -628,6 +631,11 @@ class Service:
             raise Problem(404, 'unknown_tool', 'Unknown tool.')
         service, _, handler = graph.TOOLS[tool]
         args = args if isinstance(args, dict) else {}
+        try:
+            self.access.check(caller, tool)  # agents: the owner's level; sending is never an agent's
+        except AccessRefused as refused:
+            self._audit(caller, '-', tool, refused.code)
+            raise Problem(refused.status, refused.code, refused.message) from None
         a = self._pick(args.get('account'), service)
         call = self._quick_call_for(a['composio'], a['id']) if a['via'] == 'composio' else self._own_call(a['id'])
         try:
@@ -662,10 +670,25 @@ class Service:
                 'services': [{'id': sv, **spec} for sv, spec in SERVICES.items()],
                 'audit': self.state['audit'][-30:][::-1]}
 
+    def mail_settings(self):
+        """Owner only (Mail > Settings): the accounts with how to disconnect each, and the agents' mail level."""
+        return {'source': 'microsoft', 'agent_access': self.access.view(),
+                'accounts': [{'id': a['id'], 'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
+                              'via': 'composio' if a['via'] == 'composio' else 'own-app', 'services': a['services'],
+                              'disconnect': f"api/accounts/{a['id']}/disconnect"} for a in self.state['accounts'].values()]}
+
+    def set_agent_access(self, level):
+        try:
+            view = self.access.set(level)
+        except AccessRefused as refused:
+            raise Problem(refused.status, refused.code, refused.message) from None
+        self._audit('owner', '-', 'agent_access', level)
+        return {'agent_access': view}
+
     def status(self):
         """For agents and scripts. Never a key or token."""
         accounts = list(self.state['accounts'].values())
-        return {'connected': any(a['status'] == 'active' for a in accounts),
+        return {'connected': any(a['status'] == 'active' for a in accounts), 'mail_access': self.access.agent_view(),
                 'accounts': [{'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
                               'via': 'composio' if a['via'] == 'composio' else 'own-app', 'services': a['services']} for a in accounts],
                 'contract': graph.CONTRACT, 'tools': sorted(graph.TOOLS), 'app_link': '/wizard-os-home/?open=wizard-microsoft'}

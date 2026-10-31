@@ -17,11 +17,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph  # noqa: E402
 from service import Problem, Service  # noqa: E402
+from agent_access import AppGrants  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
-VERSION = '0.2.3'
+VERSION = '0.2.4'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -60,6 +61,7 @@ class Config:
         self.trusted_names = {h for h in listed if ':' not in h}
         self.trusted_origins = {f'http://{h}' for h in self.local_hosts} | {x.rstrip('/') for x in csv(get('WIZARD_TRUSTED_ORIGINS'))}
         self.frame_ancestors = get('WIZARD_FRAME_ANCESTORS', "'self'")
+        self.grants_file = get('WIZARD_GRANTS_FILE', '/wizard/grants.json')
 
     def host_ok(self, host):
         return host in self.trusted_hosts or host.rsplit(':', 1)[0] in self.trusted_names
@@ -128,7 +130,8 @@ def rpc(app, message, caller):
     if method == 'ping':
         return {'jsonrpc': '2.0', 'id': rid, 'result': {}}
     if method == 'tools/list':
-        return {'jsonrpc': '2.0', 'id': rid, 'result': {'tools': tools()}}
+        listed = app.service.access.visible_tools(caller, [t['name'] for t in tools()])
+        return {'jsonrpc': '2.0', 'id': rid, 'result': {'tools': [t for t in tools() if t['name'] in listed]}}
     if method != 'tools/call' or not isinstance(params, dict):
         return {'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32601, 'message': 'Method not found'}}
     name, args = params.get('name'), params.get('arguments') or {}
@@ -153,6 +156,7 @@ class App:
         self.config = config
         self.service = service or Service(config.data_dir, http=http, composio_transport=composio_transport)
         self.sessions = Sessions()
+        self.grants = AppGrants(config.grants_file)
 
     def shell_path_for(self, host):
         return '/' if host in self.config.local_hosts else self.config.shell_path
@@ -290,6 +294,11 @@ def handler_for(app):
                 pass
             elif not (host in config.local_hosts and not supplied):
                 raise Problem(401, 'not_box_local', 'This API is for agents and apps on this box.')
+            # A Wizard app acting for the owner (Mail's Send button) proves itself with its App Manager grant. Apps send it
+            # only for requests from the owner's signed-in screen; anything else here is an agent at the owner's level.
+            via_grant = app.grants.caller(self.headers.get('X-Wizard-Grant', ''))
+            if via_grant:
+                return 'app:' + via_grant
             agent = (self.headers.get('X-Wizard-Agent') or 'main').strip().lower()
             if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}', agent):
                 raise Problem(400, 'invalid_agent', 'Invalid agent name.')
@@ -383,6 +392,8 @@ def handler_for(app):
                         return self.send_json(200, app.service.own_status(session))
                     if path == '/api/quick/status':
                         return self.send_json(200, app.service.quick_status(session))
+                    if path == '/api/mail-settings':
+                        return self.send_json(200, app.service.mail_settings())
                     raise Problem(404, 'not_found', 'Not found.')
                 self.host()
                 asset = 'index.html' if path in ('', '/') else path.lstrip('/')
@@ -436,6 +447,7 @@ def handler_for(app):
                     '/api/quick/flow': lambda: (lambda f: {**f, **self.flow_links(host, f['flow'])})(
                         s.flow_begin(session, body.get('account'))),
                     '/api/quick/flow/cancel': lambda: s.flow_cancel(session, body.get('flow')),
+                    '/api/agent-access': lambda: s.set_agent_access(body.get('mail')),
                 }
                 if path in routes:
                     return self.send_json(200, routes[path]())

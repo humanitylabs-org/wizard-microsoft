@@ -1,6 +1,7 @@
 """Microsoft app tests. Composio, Microsoft login and Microsoft Graph are fakes (labelled): no test talks to the internet.
 The fakes answer with the shapes in docs.composio.dev (v3.1) and learn.microsoft.com (Graph v1.0, identity platform)."""
 import http.client
+import hashlib
 import json
 import re
 import shutil
@@ -379,11 +380,41 @@ class QuickTools(Base):
         self.assertEqual(g.sent, [])
         new = self.s.call_tool('agent:main', 'mail_draft', {'to': ['b@example.com'], 'subject': 'Hi', 'body': 'Hello'})
         self.assertEqual(new['draft']['to'], ['b@example.com'])
-        self.s.call_tool('agent:main', 'mail_send', {'draft_id': draft['draft']['id']})
+        # Draft only (the default): an agent's send is refused here, whatever it says it is.
+        for caller in ('agent:main', 'agent:wizard-mail'):
+            with self.assertRaises(service_mod.Problem) as refused:
+                self.s.call_tool(caller, 'mail_send', {'draft_id': draft['draft']['id']})
+            self.assertEqual((refused.exception.status, refused.exception.code), (403, 'agent_send_refused'))
+        self.assertEqual(g.sent, [])
+        # Mail acting for the owner (its App Manager grant, after the owner taps Send) sends it.
+        self.s.call_tool('app:wizard-mail', 'mail_send', {'draft_id': draft['draft']['id']})
         self.assertEqual(len(g.sent), 1)
         with self.assertRaises(service_mod.Problem) as caught:
-            self.s.call_tool('agent:main', 'mail_send', {'draft_id': 'NOPE'})
+            self.s.call_tool('app:wizard-mail', 'mail_send', {'draft_id': 'NOPE'})
         self.assertEqual(caught.exception.code, 'not_found')
+
+    def test_agent_mail_levels(self):
+        draft_args = {'to': ['b@example.com'], 'subject': 'Hi', 'body': 'x'}
+        self.assertEqual(self.s.access.level(), 'draft_only')
+        self.s.set_agent_access('read_only')
+        self.s.call_tool('agent:main', 'mail_search', {})
+        for tool, args in (('mail_draft', draft_args), ('mail_update', {'id': 'AAMk1', 'read': True})):
+            with self.assertRaises(service_mod.Problem) as refused:
+                self.s.call_tool('agent:main', tool, args)
+            self.assertEqual(refused.exception.code, 'agent_access_denied')
+        self.s.call_tool('app:wizard-mail', 'mail_draft', draft_args)
+        self.s.set_agent_access('no_access')
+        with self.assertRaises(service_mod.Problem):
+            self.s.call_tool('agent:main', 'mail_search', {})
+        self.assertEqual(self.s.status()['mail_access']['level'], 'no_access')
+        self.s.call_tool('agent:main', 'calendar_list_events', {})  # calendar is not limited by the mail level
+        with self.assertRaises(service_mod.Problem):
+            self.s.set_agent_access('draft_and_send')
+        self.s.access.path.write_text('{nope')
+        self.assertEqual(self.s.access.level(), 'no_access')
+        self.s.set_agent_access('draft_only')
+        self.assertEqual(oct(self.s.access.path.stat().st_mode & 0o777), '0o600')
+        self.assertEqual(self.composio.graph.sent, [])
 
     def test_folders_html_and_update(self):
         g = self.composio.graph
@@ -595,14 +626,43 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.send('POST', '/v1/mail_search', {}, host='box.example:8444')[0], 401)
         status, value, _ = self.send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'})
         names = {t['name'] for t in value['result']['tools']}
-        self.assertEqual(names, {'microsoft_status', 'mail_search', 'mail_get', 'mail_draft', 'mail_send', 'mail_update', 'calendar_list_events',
+        # Agents never see mail_send (Draft only is the highest agent level; the owner sends from Mail).
+        self.assertEqual(names, {'microsoft_status', 'mail_search', 'mail_get', 'mail_draft', 'mail_update', 'calendar_list_events',
                                  'calendar_create_event', 'calendar_update_event', 'calendar_delete_event', 'calendar_respond'})
-        send = next(t for t in value['result']['tools'] if t['name'] == 'mail_send')
-        self.assertTrue(send['annotations'].get('destructiveHint'))
-        self.assertIn('SENDS MAIL', send['description'])
         status, value, _ = self.send('POST', '/v1/mail_search', {})
         self.assertEqual(value['error']['code'], 'not_connected')
         self.assertEqual(self.send('GET', '/v1/status')[1]['contract'], 'wizard.mail-calendar/1')
+
+
+    def test_agents_cannot_send_and_only_the_owner_sets_the_level(self):
+        grants = Path(self.dir) / 'grants.json'
+        token = 'grant-token-for-wizard-mail-app'
+        grants.write_text(json.dumps({'incoming': [{'from': 'wizard-mail', 'sha256': hashlib.sha256(token.encode()).hexdigest()},
+                                                   {'from': 'host:agent-service', 'sha256': hashlib.sha256(b'gateway-grant-token-123').hexdigest()}]}))
+        self.app.grants.path = grants
+        try:
+            call = {'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call', 'params': {'name': 'mail_send', 'arguments': {'draft_id': 'd1'}}}
+            for headers in ({}, {'X-Wizard-Agent': 'wizard-mail'}, {'X-Wizard-Grant': 'forged-grant-token-000'},
+                            {'X-Wizard-Grant': 'gateway-grant-token-123'}):
+                status, value, _ = self.send('POST', '/mcp', call, headers)
+                self.assertEqual((status, value['result']['structuredContent']['error']['code']), (200, 'agent_send_refused'), headers)
+                status, value, _ = self.send('POST', '/v1/mail_send', {'draft_id': 'd1'}, headers)
+                self.assertEqual((status, value['error']['code']), (403, 'agent_send_refused'), headers)
+            status, value, _ = self.send('POST', '/v1/mail_send', {'draft_id': 'd1'}, {'X-Wizard-Grant': token})
+            self.assertNotEqual(value['error']['code'], 'agent_send_refused')
+            owner = self.owner()
+            status, value, _ = owner('GET', '/api/mail-settings')
+            self.assertEqual((status, value['agent_access']['mail']), (200, 'draft_only'))
+            self.assertEqual(self.send('POST', '/api/agent-access', {'mail': 'read_only'})[0], 403)  # no session, no origin
+            self.assertEqual(self.send('POST', '/api/agent-access', {'mail': 'read_only'}, {'Authorization': 'Bearer x'})[0], 403)
+            self.assertEqual(owner('POST', '/api/agent-access', {'mail': 'draft_and_send'})[0], 400)
+            status, value, _ = owner('POST', '/api/agent-access', {'mail': 'read_only'})
+            self.assertEqual((status, value['agent_access']['mail']), (200, 'read_only'))
+            status, value, _ = self.send('POST', '/v1/mail_draft', {'to': ['a@example.com'], 'body': 'x'})
+            self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
+            owner('POST', '/api/agent-access', {'mail': 'draft_only'})
+        finally:
+            grants.unlink()
 
 
 if __name__ == '__main__':

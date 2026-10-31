@@ -76,6 +76,14 @@ works too.
 
 - `mail_draft` never sends. `mail_send` only sends an existing draft, so the owner can approve the exact text first. It
   is annotated `destructiveHint` and its description starts with SENDS MAIL.
+- Agent access (`app/agent_access.py`, the same file in every source): the owner's level for agents' mail, kept in
+  `DATA_DIR/agent-access.json` and enforced by the source for every MCP and `/v1` call: `no_access`, `read_only`
+  (`mail_search`, `mail_get`), `draft_only` (+ `mail_draft`, `mail_update`; the default). Agents never send:
+  `mail_send` is refused (`agent_send_refused`) and not listed to them. A Wizard app proves it acts for the owner by
+  sending its App Manager grant in `X-Wizard-Grant` (looked up in `$WIZARD_GRANTS_FILE` `incoming`); front ends send it
+  only for requests from the owner's signed-in screen (Mail's Send button) and never for their own agent tools.
+  Owner routes: `GET api/mail-settings` (accounts with their `disconnect` route, and `agent_access`) and
+  `POST api/agent-access {mail}`, both behind the owner's Wizard session, CSRF and same origin.
 - Mail and event text is untrusted data from other people: results carry an `untrusted` note; sources never act on it.
 - Errors are `{error: {code, message}}` with stable codes: `not_connected`, `service_off`, `account_required`,
   `account_not_found`, `reauth_required`, `invalid_arguments`, `not_found`, `rate_limited`, `permission_missing` /
