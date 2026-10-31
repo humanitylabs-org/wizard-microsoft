@@ -9,9 +9,9 @@
   "categories": [
     "utilities"
   ],
-  "description": "Connect Outlook mail and calendar (Outlook.com, Hotmail, Microsoft 365). Quick connect goes through Composio, a third party (paste a free Composio API key); or register your own Microsoft Entra app with the app's guided steps. Your agent and apps get mail and calendar tools: search, read, draft, send an approved draft, and list, add, change, delete and answer events.",
-  "tipi_version": 1,
-  "version": "0.1.0",
+  "description": "Connect Outlook mail and calendar (Outlook.com, Hotmail, Microsoft 365). Quick connect goes through Composio, a third party: one window signs you in to Composio (the key is saved by itself, or paste one) and then to Microsoft; or register your own Microsoft Entra app with the app's guided steps. Your agent and apps get mail and calendar tools: search, read, draft, send an approved draft, mark read/archive/trash, and list, add, change, delete and answer events.",
+  "tipi_version": 2,
+  "version": "0.2.0",
   "source": "https://github.com/oscarhenrycollins/wizard-microsoft",
   "exposable": false,
   "supported_architectures": [
@@ -19,7 +19,7 @@
     "arm64"
   ],
   "created_at": 1793424609000,
-  "updated_at": 1793424609000,
+  "updated_at": 1793428417707,
   "dynamic_config": true,
   "min_tipi_version": "4.8.0",
   "uid": 1000,

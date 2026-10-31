@@ -21,8 +21,8 @@ from service import Problem, Service  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
-VERSION = '0.1.0'
-ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css'}
+VERSION = '0.2.0'
+ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css', 'close.js'}
 FORWARDING = ('X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded', 'X-Real-IP')
 SESSION_TTL = 8 * 3600
 MAX_BODY = 128_000
@@ -187,6 +187,31 @@ def handler_for(app):
             self.end_headers()
             self.wfile.write(raw)
 
+        def send_redirect(self, url):
+            self.send_response(302)
+            self.headers_common('text/plain; charset=utf-8')
+            self.send_header('Location', url)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+        def send_done(self, title, message, close):
+            # The popup's last page. close.js closes it when the app opened it; the opener also closes it.
+            esc = lambda s: s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+            script = '<script src="../../close.js"></script>' if close else ''
+            raw = (f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                   f'<meta name="color-scheme" content="dark light"><title>{esc(title)}</title><link rel="stylesheet" href="../../wizard-tokens.css">'
+                   f'<link rel="stylesheet" href="../../wizard-ui.css"><link rel="stylesheet" href="../../standalone.css">'
+                   f'<body><main class="wz-empty"><strong>{esc(title)}</strong><p>{esc(message)}</p></main>{script}</body></html>').encode()
+            self.send_response(200)
+            self.headers_common('text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def flow_base(self, host):
+            origin = config.origin_for(host) or f'http://{host}'
+            return origin.rstrip('/') + app.shell_path_for(host) + 'quick/go'
+
         def fail(self, problem):
             self.send_json(problem.status, {'error': problem.as_dict()})
 
@@ -300,9 +325,29 @@ def handler_for(app):
                         if result['status'] == 'failed':
                             return self.send_page(400, 'Not connected', result['result']['message'])
                     return self.send_page(200, 'Almost done', 'Return to Wizard: the Microsoft app finishes the connection there.')
+                go = re.fullmatch(r'/quick/go/(qf-[A-Za-z0-9_-]{8,40})', path)
+                if go:
+                    # The Quick connect popup loops through here: Composio sign-in, then the Microsoft sign-in, then done.
+                    host = self.owner()
+                    try:
+                        view, target = app.service.flow_step(self.session(), go.group(1), self.flow_base(host))
+                    except Problem as problem:
+                        return self.send_done('Not connected', problem.message, False)
+                    if target:
+                        return self.send_redirect(target)
+                    if view['state'] == 'done':
+                        who = (view.get('result') or {}).get('email') or 'Your account'
+                        return self.send_done('Connected', f'{who} is connected. This window closes by itself.', True)
+                    return self.send_done('Not connected', (view.get('error') or {}).get('message') or 'Start again from Wizard.', True)
                 if path.startswith('/api/'):
                     host = self.owner()
                     session = self.session()
+                    if path == '/api/quick/flow':
+                        flow = query.get('flow') or ''
+                        if not re.fullmatch(r'qf-[A-Za-z0-9_-]{8,40}', flow):
+                            raise Problem(400, 'invalid_flow', 'Unknown sign-in.')
+                        view, _ = app.service.flow_step(session, flow, self.flow_base(host))
+                        return self.send_json(200, {**view, 'go': app.shell_path_for(host) + 'quick/go/' + flow})
                     if path == '/api/home':
                         return self.send_json(200, app.service.home(self.redirect_uri(host), session))
                     if path == '/api/own/status':
@@ -359,6 +404,9 @@ def handler_for(app):
                     '/api/own/start': lambda: s.start_own(session, self.redirect_uri(host), body.get('account')),
                     '/api/quick/keys': lambda: s.add_key(body.get('key'), body.get('label')),
                     '/api/quick/start': lambda: s.start_quick(session, body.get('account'), shell + 'quick/callback'),
+                    '/api/quick/flow': lambda: (lambda f: {**f, 'go': app.shell_path_for(host) + 'quick/go/' + f['flow']})(
+                        s.flow_begin(session, body.get('account'))),
+                    '/api/quick/flow/cancel': lambda: s.flow_cancel(session, body.get('flow')),
                 }
                 if path in routes:
                     return self.send_json(200, routes[path]())

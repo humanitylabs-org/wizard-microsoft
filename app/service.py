@@ -170,6 +170,7 @@ class Service:
         self.lock = threading.RLock()
         self.flows = {}               # sha(state) -> own-app sign-in in progress (memory only)
         self.links = composio.Links(clock)
+        self.guide = composio.Guide(_GuideAdapter(self), composio_transport, clock)
 
     def _commit(self):
         self.store.save(self.state)
@@ -427,6 +428,27 @@ class Service:
             raise Problem(error.status, 'composio_' + error.code, error.message) from None
         return {'quick': self.quick_view()}
 
+    # ----- guided popup: Sign in to Composio when needed, then the Outlook sign-in -----
+    def flow_begin(self, session, account=None):
+        if account:
+            a = self.account(account)
+            if a['via'] != 'composio':
+                raise Problem(404, 'account_not_found', 'Account not found.')
+        try:
+            return {'flow': self.guide.begin(session, ['outlook'], account)}
+        except composio.ComposioError as error:
+            raise Problem(error.status if 400 <= error.status < 600 else 502, 'composio_' + error.code, error.message) from None
+
+    def flow_step(self, session, flow_id, callback_base):
+        flow = self.guide.get(flow_id, session)
+        if not flow:
+            raise Problem(404, 'flow_not_found', 'This sign-in ended. Start again.')
+        view = self.guide.advance(flow, callback_base)
+        return view, self.guide.target(flow)
+
+    def flow_cancel(self, session, flow_id):
+        return self.guide.cancel(flow_id, session)
+
     def start_quick(self, session, account=None, callback_base=None):
         existing = self.state['accounts'].get(account) if account else None
         if account and (not existing or existing['via'] != 'composio'):
@@ -661,3 +683,28 @@ class Service:
                 'accounts': [{'id': a['id'], 'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
                               'via': 'composio' if a['via'] == 'composio' else 'own-app', 'services': a['services']} for a in accounts],
                 'error': error}
+
+
+class _GuideAdapter:
+    def __init__(self, service):
+        self.service = service
+
+    def ready(self):
+        keys = self.service.keys()
+        keys.recheck()
+        return any(k['status'] in ('ok', 'unchecked') for k in self.service.state['quick']['keys'])
+
+    def add_key(self, key):
+        self.service.keys().add(key, 'Composio')
+
+    def start(self, session, service, account, callback_base):
+        try:
+            return self.service.start_quick(session, account, callback_base)
+        except Problem as problem:
+            raise composio.ComposioError(problem.code.removeprefix('composio_'), problem.message, problem.status) from None
+
+    def status(self, session, attempt):
+        return self.service.quick_status(session, attempt)
+
+    def label(self, service):
+        return 'Outlook'

@@ -12,6 +12,17 @@ It only knows Composio's REST API v3.1 (https://docs.composio.dev/reference):
     POST /connected_accounts/{id}/revoke, DELETE /connected_accounts/{id}
     POST /tools/execute/proxy      provider API request signed by Composio -> {status, data, headers}
 
+Sign in to Composio from the app (no key to copy): the same flow as Composio's own `composio login` /
+`composio dev init` (github.com/ComposioHQ/composio, ts/packages/cli/src/effects/browser-login.ts):
+
+    POST /api/v3.1/cli/create-session {scope: 'project'}      no credential -> {id, code, expiresAt, status: pending}
+    owner opens https://dashboard.composio.dev/?cliKey=<id>   signs in or signs up on Composio's own page
+    GET  /api/v3.1/cli/get-session?id=<id>                    pending -> linked {api_key: uak_..., account}; 404 = expired
+    GET  /api/v3.1/auth/session/info   (x-user-api-key)        project {nano_id, org.id} and, when present, api_key.key
+    POST /api/v3/org/project/<project>/api_keys/create          (x-user-api-key, x-org-id, x-project-id) when info had no key
+
+Only the resulting project key is stored; the user-level key is used once in memory and dropped.
+
 Composio holds and refreshes the provider tokens (custody); this app never sees them. Keys are kept by
 the app (encrypted store or 0600 file): this module works on a plain dict the app persists.
 """
@@ -80,11 +91,14 @@ class HttpTransport:
         self.timeout = timeout
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), self._NoRedirect())
 
-    def __call__(self, method, url, key, body=None):
+    def __call__(self, method, url, key, body=None, headers=None):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != 'https' or parts.hostname != API_HOST:
             raise ComposioError('policy', 'Endpoint refused.', 500)
-        headers = {'x-api-key': key, 'Accept': 'application/json', 'User-Agent': 'wizard-composio/1'}
+        extra = headers or {}
+        headers = {'Accept': 'application/json', 'User-Agent': 'wizard-composio/1', **extra}
+        if key:
+            headers['x-api-key'] = key
         data = None
         if body is not None:
             data = json.dumps(body).encode()
@@ -318,3 +332,230 @@ class Links:
     def latest(self, session):
         mine = [v for v in self.items.values() if v.get('session') == session and v['expires'] > self.clock()]
         return max(mine, key=lambda v: v['seq']) if mine else None
+
+
+# ---------- Sign in to Composio from the app ----------
+
+BACKEND = 'https://backend.composio.dev'
+DASHBOARD_URL = os.environ.get('COMPOSIO_DASHBOARD_URL') or 'https://dashboard.composio.dev/'
+SESSION_ID = re.compile(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+NANO_ID = re.compile(r'^[A-Za-z0-9_\-]{2,80}$')
+KEY_NAMES = ('api_key', 'apiKey', 'key', 'token')
+
+
+def _find_key(payload, exclude):
+    """First project-key-looking string under a key-like name (the create-key answer is not documented)."""
+    queue = [payload]
+    while queue:
+        current = queue.pop(0)
+        if isinstance(current, list):
+            queue.extend(current)
+            continue
+        if not isinstance(current, dict):
+            continue
+        for name, value in current.items():
+            if isinstance(value, str) and name in KEY_NAMES and value != exclude and KEY_SHAPE.match(value) \
+                    and not value.startswith('uak_'):
+                return value
+            if isinstance(value, (dict, list)):
+                queue.append(value)
+    return None
+
+
+class SignIn:
+    """Composio's CLI login, run by the app: the owner signs in on Composio's page and a project key arrives."""
+
+    def __init__(self, transport=None):
+        self.transport = transport or HttpTransport()
+
+    def _call(self, method, path, body=None, headers=None):
+        status, payload = self.transport(method, BACKEND + path, None, body, headers=headers or {})
+        return status, payload if isinstance(payload, dict) else {}
+
+    def start(self):
+        status, value = self._call('POST', '/api/v3.1/cli/create-session', {'scope': 'project'})
+        sid = str(value.get('id') or '')
+        if status >= 400 or not SESSION_ID.match(sid):
+            raise _error(status if status >= 400 else 502, value)
+        return {'id': sid, 'code': str(value.get('code') or '')[:12], 'url': DASHBOARD_URL + '?cliKey=' + sid,
+                'expires': str(value.get('expiresAt') or '')}
+
+    def poll(self, sid):
+        """('pending', None) | ('linked', user_key) | ('expired', None). Composio down counts as pending."""
+        if not SESSION_ID.match(sid or ''):
+            return 'expired', None
+        try:
+            status, value = self._call('GET', '/api/v3.1/cli/get-session?' + urllib.parse.urlencode({'id': sid}))
+        except ComposioError:
+            return 'pending', None
+        if status == 404:
+            return 'expired', None
+        if status >= 400:
+            return ('pending', None) if status >= 500 or status == 429 else ('expired', None)
+        if value.get('status') == 'linked' and isinstance(value.get('api_key'), str) and KEY_SHAPE.match(value['api_key']):
+            return 'linked', value['api_key']
+        return 'pending', None
+
+    def project_key(self, user_key):
+        """The project API key for the signed-in Composio account (read or minted once). Never returns the user key."""
+        auth = {'x-user-api-key': user_key}
+        status, info = self._call('GET', '/api/v3.1/auth/session/info', headers=auth)
+        if status >= 400:
+            raise _error(status, info)
+        found = info.get('api_key') if isinstance(info.get('api_key'), dict) else {}
+        key = found.get('key')
+        if isinstance(key, str) and key != user_key and KEY_SHAPE.match(key) and not key.startswith('uak_'):
+            return key
+        project = info.get('project') if isinstance(info.get('project'), dict) else {}
+        org = project.get('org') if isinstance(project.get('org'), dict) else {}
+        pid, oid = str(project.get('nano_id') or project.get('id') or ''), str(org.get('id') or '')
+        if not (NANO_ID.match(pid) and NANO_ID.match(oid)):
+            raise ComposioError('unavailable', 'Composio did not say which project to use. Paste a key instead.', 502)
+        status, made = self._call('POST', f'/api/v3/org/project/{urllib.parse.quote(pid, safe="")}/api_keys/create',
+                                  {'name': 'wizard-' + time.strftime('%Y-%m-%d')}, {**auth, 'x-org-id': oid, 'x-project-id': pid})
+        key = _find_key(made, user_key) if status < 400 else None
+        if not key:
+            raise _error(status, made) if status >= 400 else ComposioError(
+                'unavailable', 'Composio did not hand over a key. Paste a key instead.', 502)
+        return key
+
+
+# ---------- One guided popup: Composio sign-in (if needed), then each provider sign-in ----------
+
+GUIDE_TTL = 30 * 60
+
+
+class Guide:
+    """Quick connect as one popup the owner only signs in through. The app passes an adapter with:
+
+        ready()                               -> bool: a saved Composio key works
+        add_key(key)                          -> saves a project key (validated by Keys.add)
+        start(session, service, account, callback_base) -> {'attempt', 'redirect_url'}
+        status(session, attempt)              -> {'status': pending|connected|failed, 'result': {...}}
+        label(service)                        -> 'Gmail', 'Outlook', ...
+
+    `advance()` moves the flow as far as it can and says where the popup belongs: on Composio's sign-in page,
+    on a provider sign-in page, or done. The popup itself loops through the app's `/quick/go/<flow>` page."""
+
+    def __init__(self, adapter, transport=None, clock=time.time, signin=None):
+        self.adapter, self.clock = adapter, clock
+        self.signin = signin or SignIn(transport)
+        self.flows, self.lock = {}, threading.RLock()
+
+    def begin(self, session, services, account=None):
+        if not services:
+            raise ComposioError('rejected', 'Choose what to connect.', 400)
+        steps = ([] if self.adapter.ready() else ['composio']) + list(services)
+        flow_id = 'qf-' + secrets.token_urlsafe(12)
+        with self.lock:
+            stamp = self.clock()
+            self.flows = {k: v for k, v in self.flows.items() if v['expires'] > stamp}
+            if len(self.flows) >= 16:
+                raise ComposioError('rejected', 'Too many sign-ins in progress.', 429)
+            self.flows[flow_id] = {'id': flow_id, 'session': session, 'steps': steps, 'i': 0, 'account': account,
+                                   'signin': None, 'attempt': None, 'redirect': None, 'state': 'running',
+                                   'where': None, 'result': None, 'error': None, 'connected': [],
+                                   'expires': stamp + GUIDE_TTL}
+        return flow_id
+
+    def get(self, flow_id, session):
+        flow = self.flows.get(flow_id or '')
+        if not flow or flow['expires'] <= self.clock() or flow['session'] != session:
+            return None
+        return flow
+
+    def cancel(self, flow_id, session):
+        with self.lock:
+            flow = self.get(flow_id, session)
+            if flow and flow['state'] == 'running':
+                flow.update(state='cancelled', where='done')
+        return {'cancelled': True}
+
+    def _fail(self, flow, code, message):
+        flow.update(state='failed', where='done', error={'code': code, 'message': message})
+
+    def advance(self, flow, callback_base):
+        with self.lock:
+            while flow['state'] == 'running' and flow['i'] < len(flow['steps']):
+                step = flow['steps'][flow['i']]
+                if step == 'composio':
+                    if not self._composio(flow):
+                        break
+                    continue
+                if not self._service(flow, step, callback_base):
+                    break
+            if flow['state'] == 'running' and flow['i'] >= len(flow['steps']):
+                flow.update(state='done', where='done')
+            return self.view(flow)
+
+    def _composio(self, flow):
+        if self.adapter.ready():
+            flow['i'] += 1
+            return True
+        try:
+            if not flow['signin']:
+                flow['signin'] = self.signin.start()
+                flow['where'] = 'composio'
+                return False
+            state, user_key = self.signin.poll(flow['signin']['id'])
+            if state == 'pending':
+                flow['where'] = 'composio'
+                return False
+            if state == 'expired':
+                self._fail(flow, 'signin_expired', 'The Composio sign-in timed out. Start again.')
+                return False
+            key = self.signin.project_key(user_key)
+            del user_key
+            try:
+                self.adapter.add_key(key)
+            except ComposioError as error:
+                if error.status != 409:  # 409: this key is already saved
+                    raise
+        except ComposioError as error:
+            self._fail(flow, 'composio_' + error.code, error.message)
+            return False
+        flow['i'] += 1
+        return True
+
+    def _service(self, flow, service, callback_base):
+        try:
+            if not flow['attempt']:
+                out = self.adapter.start(flow['session'], service, flow['account'], callback_base + '/' + flow['id'])
+                flow.update(attempt=out['attempt'], redirect=out['redirect_url'], where='provider')
+                return False
+            found = self.adapter.status(flow['session'], flow['attempt'])
+        except ComposioError as error:
+            self._fail(flow, 'composio_' + error.code, error.message)
+            return False
+        if found.get('status') == 'connected':
+            result = found.get('result') or {}
+            flow['account'] = result.get('account') or flow['account']
+            flow['result'] = result
+            flow['connected'].append(service)
+            flow.update(attempt=None, redirect=None)
+            flow['i'] += 1
+            return True
+        if found.get('status') in ('failed', 'none'):
+            result = found.get('result') or {}
+            self._fail(flow, result.get('code') or 'connect_failed', result.get('message') or 'The sign-in did not finish. Try again.')
+            return False
+        flow['where'] = 'provider'
+        return False
+
+    def target(self, flow):
+        """Where the popup should go now: a Composio or provider URL, or None when done."""
+        if flow['state'] != 'running':
+            return None
+        if flow['where'] == 'composio' and flow['signin']:
+            return flow['signin']['url']
+        if flow['where'] == 'provider':
+            return flow['redirect']
+        return None
+
+    def view(self, flow):
+        step = flow['steps'][flow['i']] if flow['i'] < len(flow['steps']) else None
+        return {'flow': flow['id'], 'state': flow['state'], 'where': flow['where'], 'step': step,
+                'label': 'Composio' if step == 'composio' else (self.adapter.label(step) if step else None),
+                'steps': [{'id': s, 'label': 'Composio' if s == 'composio' else self.adapter.label(s),
+                           'done': n < flow['i'] or flow['state'] == 'done'} for n, s in enumerate(flow['steps'])],
+                'connected': list(flow['connected']), 'result': flow['result'], 'error': flow['error']}

@@ -17,8 +17,9 @@ whichever way an account is connected: Google with the owner's own client, Googl
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `mail_search` | `account?`, `query?`, `unread_only?`, `max?` (1–25), `page_token?` | `messages[]` (summary), `next_page_token`, `untrusted` |
-| `mail_get` | `account?`, `id` | `message` (summary + `body_text`, `truncated`, `attachments[]`, `message_id_header`), `untrusted` |
+| `mail_search` | `account?`, `query?`, `folder?`, `unread_only?`, `max?` (1–25), `page_token?` | `folder`, `messages[]` (summary), `next_page_token`, `untrusted` |
+| `mail_get` | `account?`, `id`, `format?` (`text` \| `html`) | `message` (summary + `body_text`, `truncated`, `attachments[]`, `message_id_header`; `body_html` with `format: html`), `untrusted` |
+| `mail_update` | `account?`, `id`, any of `read`, `archived`, `trashed` (booleans) | `updated`, `id` (Microsoft moves give a new id), `unread`, `archived`, `trashed` |
 | `mail_draft` | `account?`, `body`, `to[]`, `cc[]`, `bcc[]`, `subject`, `reply_to_id?` | `draft` {`id`, `message_id`, `thread_id`, `to`, `cc`, `subject`, `body_text`}, `sent: false` |
 | `mail_send` | `account?`, `draft_id` | `sent: true`, `id`, `thread_id` |
 | `calendar_list_events` | `account?`, `calendar_id?`, `time_min?`, `time_max?`, `query?`, `max?`, `page_token?` | `events[]`, `next_page_token`, `untrusted` |
@@ -26,6 +27,12 @@ whichever way an account is connected: Google with the owner's own client, Googl
 | `calendar_update_event` | `account?`, `calendar_id?`, `id`, any of the create fields | `updated`, `event` |
 | `calendar_delete_event` | `account?`, `calendar_id?`, `id` | `deleted`, `id` |
 | `calendar_respond` | `account?`, `calendar_id?`, `id`, `response` (`accepted` \| `declined` \| `tentative`), `comment?` | `responded`, `event` |
+
+`folder` is `inbox`, `sent`, `drafts`, `archive`, `trash` or `all` (default `all`, as in 1.0). `body_html` is the message's
+HTML exactly as sent: untrusted, never shown without sanitizing (Wizard Mail strips scripts, handlers and remote content and
+renders it in a sandboxed frame). `mail_update` never deletes for good; trash is reversible.
+
+Additions in 1.1 (`mail_update`, `folder`, `format`) are backward compatible; the contract id stays `wizard.mail-calendar/1`.
 
 Message summary: `id`, `thread_id`, `from` {name, email}, `to[]`, `cc[]`, `subject`, `date` (ISO 8601), `snippet`,
 `unread`, `labels[]`.
@@ -36,6 +43,27 @@ Event: `id`, `calendar_id`, `title`, `start`/`end` (`{date}` for all-day, else `
 `online_meeting`.
 
 Times in: a date (`2026-11-04`) for all-day, an RFC 3339 time with offset, or a local time plus `time_zone` (IANA).
+
+## Connecting from another app (owner only)
+
+Mail, Calendar or any Wizard front end can connect a source without the owner leaving it. These are the source's owner
+routes, same-origin on the shell (`/wizard-google/…`, `/wizard-microsoft/…`), protected like the source's own page
+(owner login, exact Origin, `X-CSRF-Token` from `POST api/session` with `X-Wizard-Request: bootstrap`):
+
+| Route | Use |
+|---|---|
+| `POST api/session` | Session cookie (path = the source's path) + CSRF token. |
+| `GET api/home` | Accounts and Quick connect readiness (`quick.ready`, never a key). |
+| `POST api/quick/flow` `{services?, account?}` | Starts Quick connect: `{flow, go}`. Adds "Sign in to Composio" first when no key works. |
+| `GET api/quick/flow?flow=` | Moves the flow on and reports `{state, where, step, label, steps[], connected[], result, error, go}`. |
+| `POST api/quick/flow/cancel` `{flow}` | Stops it. |
+| `GET quick/go/<flow>` | The popup page: redirects to Composio's sign-in, then each provider sign-in, then says Connected and closes. |
+
+Front end recipe: on the tap, `window.open('', '_blank')` (keep the handle), POST `api/quick/flow`, point the window at
+`go`, then poll `api/quick/flow` every 1.5 s. While `where` is `composio` the window sits on Composio's own page; when a
+poll reports any other `where`, set the window's location to `go` again (Composio's page does not redirect back). On
+`state: done` close the window and reload accounts. If the window was blocked or closed, offer a Continue button that opens
+`go` again (a new tap).
 
 ## Rules every source keeps
 

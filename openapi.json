@@ -55,6 +55,18 @@
           "type": "string",
           "description": "Search words; the provider's search syntax works (e.g. from:anna, subject:invoice)."
          },
+         "folder": {
+          "type": "string",
+          "enum": [
+           "inbox",
+           "sent",
+           "drafts",
+           "archive",
+           "trash",
+           "all"
+          ],
+          "description": "inbox, sent, drafts, archive, trash or all (default all)."
+         },
          "unread_only": {
           "type": "boolean",
           "description": "Only unread messages."
@@ -102,6 +114,14 @@
          "id": {
           "type": "string",
           "description": "Message id from mail_search."
+         },
+         "format": {
+          "type": "string",
+          "enum": [
+           "text",
+           "html"
+          ],
+          "description": "html adds body_html (unsanitized; mail apps clean it)."
          }
         }
        }
@@ -475,6 +495,50 @@
          },
          "comment": {
           "type": "string"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "Result in contract wizard.mail-calendar/1"
+     },
+     "4XX": {
+      "description": "{error:{code,message}}"
+     }
+    }
+   }
+  },
+  "/v1/mail_update": {
+   "post": {
+    "summary": "Mark a message read or unread, archive it, or move it to the trash (or back). Nothing is deleted for good. Ask the owner before archiving or trashing.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "id"
+        ],
+        "properties": {
+         "account": {
+          "type": "string",
+          "description": "Email or label (e.g. \"work\") of the account. Optional when only one account has this on."
+         },
+         "id": {
+          "type": "string"
+         },
+         "read": {
+          "type": "boolean"
+         },
+         "archived": {
+          "type": "boolean"
+         },
+         "trashed": {
+          "type": "boolean"
          }
         }
        }

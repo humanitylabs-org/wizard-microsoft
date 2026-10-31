@@ -65,7 +65,7 @@
   function go(next) { stack.push(next); sheetClose(); say(''); render(); view.scrollTop = 0; }
   function back() { if (!stack.length) return false; stack.pop(); render(); return true; }
   if (window.WizardApp?.version === 1) {
-    WizardApp.ready({ name: 'wizard-microsoft', version: '0.1.0' });
+    WizardApp.ready({ name: 'wizard-microsoft', version: '0.2.0' });
     WizardApp.back.register({ canGoBack: () => stack.length > 0, back });
   }
 
@@ -184,11 +184,12 @@
     view.append(crumb('Quick connect'));
     view.append(el('p', q.note, 'quick-note'));
     const keys = el('section', null, 'wz-sec');
-    keys.append(title(q.keys.length ? 'Your Composio key' + (q.keys.length > 1 ? 's' : '') : '1. Get a Composio key'));
+    keys.append(title(q.keys.length ? 'Your Composio key' + (q.keys.length > 1 ? 's' : '') : 'Composio account'));
     if (!q.keys.length) {
-      keys.append(note(`Create a free Composio account, then copy its API key. ${q.key_help}`));
-      const acts = el('div', null, 'actions pad'); acts.append(link('Create free account ↗', q.signup_url)); keys.append(acts);
-      keys.append(keyForm(false));
+      keys.append(note('Quick connect asks you to sign in to Composio (or create a free account) in the same window. The key is saved by itself.'));
+      const acts = el('div', null, 'actions pad');
+      acts.append(button('Paste a key instead', () => openSheet('Paste a Composio key', el('p', q.key_help, 'muted'), keyForm(true)), 'wz-button secondary'));
+      keys.append(acts);
     } else {
       const list = el('div', null, 'wz-list');
       for (const k of q.keys) list.append(keyRow(k));
@@ -198,8 +199,8 @@
     }
     view.append(keys);
     const connect = el('section', null, 'wz-sec');
-    connect.append(title(q.keys.length ? 'Connect' : '2. Connect'), note('Sign in to Microsoft on Composio\'s page. One sign-in covers Mail and Calendar.'));
-    const acts = el('div', null, 'actions pad'); acts.append(button('Quick connect', () => startQuick(null), 'wz-button', q.ready ? {} : { disabled: '' }));
+    connect.append(title('Connect'), note('One window: sign in to Microsoft (and Composio the first time). One sign-in covers Mail and Calendar.'));
+    const acts = el('div', null, 'actions pad'); acts.append(button('Quick connect', () => startQuick(null), 'wz-button'));
     connect.append(acts);
     const mine = home.accounts.filter(a => a.via === 'composio');
     if (mine.length) connect.append(note(`Connected: ${mine.map(a => a.email || 'Microsoft account').join(', ')}.`));
@@ -235,14 +236,43 @@
     form.append(el('label', 'Composio API key', null, { for: id }), input, msg, actionsOf(save));
     return form;
   }
+  // One popup does it all: Composio sign-in when no key works yet, then the Microsoft sign-in (contract doc, "Connecting from another app").
   async function startQuick(account) {
     const tab = window.open('', '_blank');
+    stopPolling();
     try {
-      const out = await api('api/quick/start', { account: account ? account.id : null });
-      if (tab) { tab.opener = null; tab.location.href = out.redirect_url; }
-      waitSheet('Finish in the new tab', 'Choose your Microsoft account and accept. When it says you can close the tab, come back here. This page updates by itself.', out.redirect_url, !!tab);
-      poll('api/quick/status');
+      const out = await api('api/quick/flow', { account: account ? account.id : null });
+      const go = new URL(out.go, location.href).href;
+      if (tab) { tab.opener = null; tab.location.href = go; }
+      flowSheet(out.flow, go, tab, null);
+      pollFlow(out.flow, go, tab);
     } catch (e) { if (tab) tab.close(); sheetClose(); say(e.message); }
+  }
+  function flowSheet(flow, go, tab, v) {
+    const text = v && v.where === 'composio'
+      ? 'Sign in or create a free Composio account in the new window. Your key is saved by itself.'
+      : 'Choose your Microsoft account and accept. This page updates by itself.';
+    const again = button(tab && !tab.closed ? 'Show the window' : 'Continue', () => { const t = window.open(go, '_blank'); if (t) { t.opener = null; pollFlow(flow, go, t); } }, 'wz-button secondary');
+    openSheet('Finish in the new window', el('p', text, 'muted'), el('div', null, 'spinner', { 'aria-hidden': 'true' }),
+      actionsOf(again, button('Cancel', () => { stopPolling(); api('api/quick/flow/cancel', { flow }).catch(() => {}); if (tab && !tab.closed) tab.close(); sheetClose(); }, 'wz-button secondary')));
+  }
+  function pollFlow(flow, go, tab) {
+    stopPolling();
+    const mine = ++seq;
+    let where = null, shown = '';
+    polling = setInterval(async () => {
+      try {
+        const v = await api('api/quick/flow?flow=' + encodeURIComponent(flow));
+        if (mine !== seq) return;
+        if (v.state === 'done') { stopPolling(); if (tab && !tab.closed) tab.close(); sheetClose(); await refresh(); say(`Connected ${(v.result && v.result.email) || 'your account'}.`, true); return; }
+        if (v.state !== 'running') { stopPolling(); if (tab && !tab.closed) tab.close(); sheetClose(); if (v.error) say(v.error.message); await refresh(); return; }
+        // Composio's own page does not come back by itself: bring the window back once the key has landed.
+        if (where === 'composio' && v.where !== 'composio' && tab && !tab.closed) { try { tab.location.href = go; } catch (_) { /* window gone */ } }
+        where = v.where;
+        const sig = v.step + v.where + (tab && tab.closed);
+        if (sig !== shown) { shown = sig; flowSheet(flow, go, tab, v); }
+      } catch { /* keep waiting */ }
+    }, 1500);
   }
 
   // ---------- your own Microsoft app ----------
@@ -338,6 +368,9 @@
   // ---------- start ----------
   addEventListener('focus', () => { if (csrf && !sheet.open) refresh().catch(() => {}); });
   fetch('api/session', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-Wizard-Request': 'bootstrap' }, body: '{}' })
-    .then(async r => { const v = await r.json(); if (!r.ok) throw new Error(v.error?.message || 'Unavailable.'); csrf = v.csrf; await refresh(); })
+    .then(async r => { const v = await r.json(); if (!r.ok) throw new Error(v.error?.message || 'Unavailable.'); csrf = v.csrf; await refresh();
+      // Deep links from Mail and Calendar: ?start=own opens your-own-app setup, ?start=quick the Quick connect page.
+      const start = new URLSearchParams(location.search).get('start');
+      if (start === 'own') go({ kind: 'own' }); else if (start === 'quick') go({ kind: 'quick' }); })
     .catch(e => { const box = el('div', null, 'wz-empty'); box.append(el('strong', 'Microsoft is not available'), el('p', e.message)); view.replaceChildren(box); });
 })();
