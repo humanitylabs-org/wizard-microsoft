@@ -84,6 +84,15 @@ works too.
   only for requests from the owner's signed-in screen (Mail's Send button) and never for their own agent tools.
   Owner routes: `GET api/mail-settings` (accounts with their `disconnect` route, and `agent_access`) and
   `POST api/agent-access {mail}`, both behind the owner's Wizard session, CSRF and same origin.
+- Calendar agent access (same file, key `calendar`): `no_access`, `read_only` (`calendar_list_events`),
+  `suggest_only` (the default) and `can_edit`. At `suggest_only` an agent's `calendar_create_event`,
+  `calendar_update_event`, `calendar_delete_event` and `calendar_respond` change nothing: the arguments are checked and
+  kept as a pending suggestion (`DATA_DIR/calendar-suggestions.json`) and the call answers `{suggested: true, applied:
+  false, suggestion}`. `calendar_suggestions` lists them (agents at Suggest only and up, and apps).
+  `calendar_suggestion_approve {id}` (applies the kept call through the owner path) and `calendar_suggestion_dismiss
+  {id}` are for a front end's grant only (`agent_approve_refused` for agents; not listed to them). Calendar sends its
+  grant only for the owner's own taps. gog `calendar` commands run `--readonly` for agents below `can_edit`.
+  Owner routes: `GET api/calendar-settings` (same shape as mail-settings) and `POST api/agent-access {calendar}`.
 - Mail and event text is untrusted data from other people: results carry an `untrusted` note; sources never act on it.
 - Errors are `{error: {code, message}}` with stable codes: `not_connected`, `service_off`, `account_required`,
   `account_not_found`, `reauth_required`, `invalid_arguments`, `not_found`, `rate_limited`, `permission_missing` /

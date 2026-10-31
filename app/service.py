@@ -27,7 +27,7 @@ from pathlib import Path
 
 import composio
 import graph
-from agent_access import AgentAccess, AccessRefused
+from agent_access import AgentAccess, AccessRefused, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call
 
 LOGIN = 'https://login.microsoftonline.com'
 SCOPES = ['offline_access', 'openid', 'email', 'profile', 'User.Read', 'Mail.ReadWrite', 'Mail.Send', 'Calendars.ReadWrite']
@@ -167,6 +167,8 @@ class Service:
         self.state = self.store.load()
         # The owner's choice of what agents may do with mail (Mail > Settings > Agent access). Draft only by default.
         self.access = AgentAccess(data_dir)
+        # Calendar changes agents suggested at Suggest only, waiting for the owner's Approve / Dismiss in Calendar.
+        self.suggestions = Suggestions(data_dir)
         self.http = http or Http()
         self.composio_transport = composio_transport
         self.clock = clock
@@ -627,16 +629,20 @@ class Service:
 
     def call_tool(self, caller, tool, args):
         """One mail/calendar tool on one account. Mail and event text in the result is untrusted data."""
+        args = args if isinstance(args, dict) else {}
+        if tool in SUGGESTION_TOOLS:
+            return self._suggestion_tool(caller, tool, args)
         if tool not in graph.TOOLS:
             raise Problem(404, 'unknown_tool', 'Unknown tool.')
         service, _, handler = graph.TOOLS[tool]
-        args = args if isinstance(args, dict) else {}
         try:
-            self.access.check(caller, tool)  # agents: the owner's level; sending is never an agent's
+            action = self.access.check(caller, tool)  # agents: the owner's levels; sending is never an agent's
         except AccessRefused as refused:
             self._audit(caller, '-', tool, refused.code)
             raise Problem(refused.status, refused.code, refused.message) from None
         a = self._pick(args.get('account'), service)
+        if action == 'suggest':
+            return self._suggest(caller, tool, args, handler, a)
         call = self._quick_call_for(a['composio'], a['id']) if a['via'] == 'composio' else self._own_call(a['id'])
         try:
             result = handler(call, args)
@@ -677,21 +683,66 @@ class Service:
                               'via': 'composio' if a['via'] == 'composio' else 'own-app', 'services': a['services'],
                               'disconnect': f"api/accounts/{a['id']}/disconnect"} for a in self.state['accounts'].values()]}
 
-    def set_agent_access(self, level):
+    def calendar_settings(self):
+        """Owner only (Calendar > Settings): the same accounts and levels as mail_settings."""
+        return self.mail_settings()
+
+    def set_agent_access(self, body):
+        """Owner only: {mail: <level>} and/or {calendar: <level>} (an older Mail sends a bare mail level)."""
+        body = body if isinstance(body, dict) else {'mail': body}
         try:
-            view = self.access.set(level)
+            view = self.access.set_from(body)
         except AccessRefused as refused:
             raise Problem(refused.status, refused.code, refused.message) from None
-        self._audit('owner', '-', 'agent_access', level)
+        self._audit('owner', '-', 'agent_access', ','.join(f'{k}={body[k]}' for k in ('mail', 'calendar') if body.get(k)))
         return {'agent_access': view}
+
+    # ===== calendar suggestions (agents at Suggest only) =====
+
+    def _suggestion_tool(self, caller, tool, args):
+        try:
+            self.access.check(caller, tool)  # approve / dismiss: the owner's tap only; listing: agents at Suggest only
+            if tool == 'calendar_suggestions':
+                return {'suggestions': self.suggestions.list(), 'level': self.access.calendar_level()}
+            item = self.suggestions.get(args.get('id'))
+        except AccessRefused as refused:
+            self._audit(caller, '-', tool, refused.code)
+            raise Problem(refused.status, refused.code, refused.message) from None
+        if tool == 'calendar_suggestion_dismiss':
+            self.suggestions.drop(item['id'])
+            self._audit(caller, '-', tool, 'ok')
+            return {'dismissed': True, 'id': item['id']}
+        # Approve: the owner's change, applied as the owner (the caller is the front end's grant, so no new suggestion).
+        result = self.call_tool(caller, item['tool'], item['args'])
+        self.suggestions.drop(item['id'])
+        self._audit(caller, '-', tool, 'ok')
+        return {'approved': True, 'id': item['id'], 'result': result}
+
+    def _suggest(self, caller, tool, args, handler, a):
+        """An agent's calendar change at Suggest only: check it as if it ran, then keep it for the owner. Nothing changes."""
+        try:
+            handler(dry_call, args)
+        except DryRun:
+            pass
+        except graph.BadArgs as bad:
+            raise Problem(400, 'invalid_arguments', str(bad)) from None
+        try:
+            item = self.suggestions.add(caller, tool, args, a['email'] or a['id'])
+        except AccessRefused as refused:
+            raise Problem(refused.status, refused.code, refused.message) from None
+        self._audit(caller, a['id'], tool, 'suggested')
+        return {'contract': graph.CONTRACT, 'source': 'microsoft', 'account': a['email'] or a['id'],
+                'suggested': True, 'applied': False, 'suggestion': item,
+                'next': 'Nothing changed yet. The owner sees this in Calendar and approves or dismisses it.'}
 
     def status(self):
         """For agents and scripts. Never a key or token."""
         accounts = list(self.state['accounts'].values())
         return {'connected': any(a['status'] == 'active' for a in accounts), 'mail_access': self.access.agent_view(),
+                'calendar_access': self.access.calendar_agent_view(),
                 'accounts': [{'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
                               'via': 'composio' if a['via'] == 'composio' else 'own-app', 'services': a['services']} for a in accounts],
-                'contract': graph.CONTRACT, 'tools': sorted(graph.TOOLS), 'app_link': '/wizard-os-home/?open=wizard-microsoft'}
+                'contract': graph.CONTRACT, 'tools': self.access.visible_tools('agent:main', sorted(graph.TOOLS) + ['calendar_suggestions']), 'app_link': '/wizard-os-home/?open=wizard-microsoft'}
 
     def connection(self):
         accounts = list(self.state['accounts'].values())

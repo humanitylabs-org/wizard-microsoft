@@ -17,12 +17,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph  # noqa: E402
 from service import Problem, Service  # noqa: E402
-from agent_access import AppGrants  # noqa: E402
+from agent_access import AppGrants, SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
-VERSION = '0.2.4'
+VERSION = '0.2.5'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -115,7 +115,7 @@ STATUS_TOOL = {'name': 'microsoft_status', 'annotations': {'readOnlyHint': True}
 
 
 def tools():
-    return [STATUS_TOOL] + graph.mcp_tools()
+    return [STATUS_TOOL] + graph.mcp_tools() + SUGGESTION_MCP_TOOLS
 
 
 def rpc(app, message, caller):
@@ -140,7 +140,7 @@ def rpc(app, message, caller):
             raise Problem(400, 'invalid_arguments', 'Arguments must be an object.')
         if name == 'microsoft_status':
             value = app.service.status()
-        elif name in graph.TOOLS:
+        elif name in graph.TOOLS or name in SUGGESTION_TOOLS:
             value = app.service.call_tool(caller, name, args)
         else:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {'code': -32602, 'message': 'Unknown tool'}}
@@ -394,6 +394,8 @@ def handler_for(app):
                         return self.send_json(200, app.service.quick_status(session))
                     if path == '/api/mail-settings':
                         return self.send_json(200, app.service.mail_settings())
+                    if path == '/api/calendar-settings':
+                        return self.send_json(200, app.service.calendar_settings())
                     raise Problem(404, 'not_found', 'Not found.')
                 self.host()
                 asset = 'index.html' if path in ('', '/') else path.lstrip('/')
@@ -423,7 +425,7 @@ def handler_for(app):
                 if local:
                     caller = self.box_caller()
                     self.host()
-                    if local.group(1) not in graph.TOOLS:
+                    if local.group(1) not in graph.TOOLS and local.group(1) not in SUGGESTION_TOOLS:
                         raise Problem(404, 'not_found', 'Not found.')
                     return self.send_json(200, app.service.call_tool(caller, local.group(1), self.body()))
                 host = self.owner()
@@ -447,7 +449,7 @@ def handler_for(app):
                     '/api/quick/flow': lambda: (lambda f: {**f, **self.flow_links(host, f['flow'])})(
                         s.flow_begin(session, body.get('account'))),
                     '/api/quick/flow/cancel': lambda: s.flow_cancel(session, body.get('flow')),
-                    '/api/agent-access': lambda: s.set_agent_access(body.get('mail')),
+                    '/api/agent-access': lambda: s.set_agent_access(body),
                 }
                 if path in routes:
                     return self.send_json(200, routes[path]())

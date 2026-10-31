@@ -439,6 +439,7 @@ class QuickTools(Base):
 
     def test_calendar_flow(self):
         g = self.composio.graph
+        self.s.access.set(calendar='can_edit')  # the owner lets agents edit: changes apply straight away
         listed = self.s.call_tool('agent:main', 'calendar_list_events', {'time_min': '2026-11-03T00:00:00+07:00', 'time_max': '2026-11-04T00:00:00+07:00'})
         self.assertEqual(listed['events'][0]['title'], 'Standup')
         self.assertEqual(listed['events'][0]['start'], {'date_time': '2026-11-03T02:00:00Z', 'time_zone': 'UTC'})
@@ -458,6 +459,40 @@ class QuickTools(Base):
         with self.assertRaises(service_mod.Problem) as caught:
             self.s.call_tool('agent:main', 'calendar_create_event', {'title': 'x', 'start': '2026-11-10', 'end': '2026-11-10T10:00:00Z'})
         self.assertEqual(caught.exception.code, 'invalid_arguments')
+
+    def test_calendar_suggestions_wait_for_the_owner(self):
+        g = self.composio.graph
+        before = {k: dict(v) for k, v in g.events.items()}
+        made = self.s.call_tool('agent:main', 'calendar_create_event', {'title': 'Dentist', 'start': '2026-11-04T10:00:00+07:00',
+                                                                         'end': '2026-11-04T11:00:00+07:00'})
+        self.assertEqual((made['suggested'], made['applied'], made['account']), (True, False, 'alex@hotmail.com'))
+        gone = self.s.call_tool('agent:main', 'calendar_delete_event', {'id': 'EV0'})
+        self.assertEqual({k: dict(v) for k, v in g.events.items()}, before)  # nothing reached Outlook
+        self.assertFalse([r for r in g.requests if r[0] in ('POST', 'PATCH', 'DELETE') and '/events' in r[1]])
+        with self.assertRaises(service_mod.Problem) as caught:
+            self.s.call_tool('agent:main', 'calendar_create_event', {'title': 'x', 'start': '2026-11-10', 'end': '2026-11-10T10:00:00Z'})
+        self.assertEqual(caught.exception.code, 'invalid_arguments')
+        self.assertEqual(len(self.s.call_tool('agent:main', 'calendar_suggestions', {})['suggestions']), 2)
+        for tool in ('calendar_suggestion_approve', 'calendar_suggestion_dismiss'):
+            with self.assertRaises(service_mod.Problem) as caught:
+                self.s.call_tool('agent:main', tool, {'id': made['suggestion']['id']})
+            self.assertEqual(caught.exception.code, 'agent_approve_refused')
+        done = self.s.call_tool('app:wizard-calendar', 'calendar_suggestion_approve', {'id': made['suggestion']['id']})
+        self.assertEqual(g.events[done['result']['event']['id']]['subject'], 'Dentist')
+        self.s.call_tool('app:wizard-calendar', 'calendar_suggestion_dismiss', {'id': gone['suggestion']['id']})
+        self.assertIn('EV0', g.events)
+        self.assertEqual(self.s.call_tool('app:wizard-calendar', 'calendar_suggestions', {})['suggestions'], [])
+        self.s.access.set(calendar='read_only')
+        with self.assertRaises(service_mod.Problem) as caught:
+            self.s.call_tool('agent:main', 'calendar_create_event', {'title': 'x', 'start': '2026-11-10', 'end': '2026-11-11'})
+        self.assertEqual(caught.exception.code, 'agent_access_denied')
+        self.s.access.set(calendar='no_access')
+        with self.assertRaises(service_mod.Problem) as caught:
+            self.s.call_tool('agent:main', 'calendar_list_events', {})
+        self.assertEqual(caught.exception.code, 'agent_access_denied')
+        self.assertEqual(self.s.access.level(), 'draft_only')
+        self.assertEqual(self.s.status()['calendar_access']['level'], 'no_access')
+        self.assertNotIn('mail_send', self.s.status()['tools'])
 
     def test_service_switch_and_reauth(self):
         self.s.set_service(self.result['account'], 'mail', False)
@@ -628,7 +663,8 @@ class HttpTests(unittest.TestCase):
         names = {t['name'] for t in value['result']['tools']}
         # Agents never see mail_send (Draft only is the highest agent level; the owner sends from Mail).
         self.assertEqual(names, {'microsoft_status', 'mail_search', 'mail_get', 'mail_draft', 'mail_update', 'calendar_list_events',
-                                 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event', 'calendar_respond'})
+                                 'calendar_create_event', 'calendar_update_event', 'calendar_delete_event', 'calendar_respond',
+                                 'calendar_suggestions'})
         status, value, _ = self.send('POST', '/v1/mail_search', {})
         self.assertEqual(value['error']['code'], 'not_connected')
         self.assertEqual(self.send('GET', '/v1/status')[1]['contract'], 'wizard.mail-calendar/1')
@@ -661,6 +697,21 @@ class HttpTests(unittest.TestCase):
             status, value, _ = self.send('POST', '/v1/mail_draft', {'to': ['a@example.com'], 'body': 'x'})
             self.assertEqual((status, value['error']['code']), (403, 'agent_access_denied'))
             owner('POST', '/api/agent-access', {'mail': 'draft_only'})
+            # Calendar: the owner's level next to mail's; approve / dismiss only with Calendar's grant.
+            cal = 'grant-token-for-wizard-calendar'
+            grants.write_text(json.dumps({'incoming': [{'from': 'wizard-calendar', 'sha256': hashlib.sha256(cal.encode()).hexdigest()},
+                                                       {'from': 'host:agent-service', 'sha256': hashlib.sha256(b'gateway-grant-token-123').hexdigest()}]}))
+            status, value, _ = owner('GET', '/api/calendar-settings')
+            self.assertEqual((status, value['agent_access']['calendar']), (200, 'suggest_only'))
+            for headers in ({}, {'X-Wizard-Agent': 'wizard-calendar'}, {'X-Wizard-Grant': 'gateway-grant-token-123'}):
+                status, value, _ = self.send('POST', '/v1/calendar_suggestion_approve', {'id': 'sg_0000000000000000'}, headers)
+                self.assertEqual((status, value['error']['code']), (403, 'agent_approve_refused'), headers)
+            status, value, _ = self.send('POST', '/v1/calendar_suggestion_approve', {'id': 'sg_0000000000000000'}, {'X-Wizard-Grant': cal})
+            self.assertEqual((status, value['error']['code']), (404, 'suggestion_not_found'))
+            self.assertEqual(self.send('POST', '/api/agent-access', {'calendar': 'can_edit'})[0], 403)
+            status, value, _ = owner('POST', '/api/agent-access', {'calendar': 'read_only'})
+            self.assertEqual((status, value['agent_access']['calendar'], value['agent_access']['mail']), (200, 'read_only', 'draft_only'))
+            owner('POST', '/api/agent-access', {'calendar': 'suggest_only'})
         finally:
             grants.unlink()
 
