@@ -21,7 +21,7 @@ from service import Problem, Service  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
-VERSION = '0.2.1'
+VERSION = '0.2.2'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the

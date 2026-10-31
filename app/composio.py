@@ -27,6 +27,7 @@ Composio holds and refreshes the provider tokens (custody); this app never sees 
 the app (encrypted store or 0600 file): this module works on a plain dict the app persists.
 """
 import json
+import sys
 import os
 import re
 import secrets
@@ -365,8 +366,9 @@ def _find_key(payload, exclude):
 class SignIn:
     """Composio's CLI login, run by the app: the owner signs in on Composio's page and a project key arrives."""
 
-    def __init__(self, transport=None):
+    def __init__(self, transport=None, sleep=time.sleep):
         self.transport = transport or HttpTransport()
+        self.sleep = sleep
 
     def _call(self, method, path, body=None, headers=None):
         status, payload = self.transport(method, BACKEND + path, None, body, headers=headers or {})
@@ -396,27 +398,65 @@ class SignIn:
             return 'linked', value['api_key']
         return 'pending', None
 
+    CLI_HEADERS = {'x-source': 'CLI', 'x-framework': 'cli'}
+
+    def _log(self, step, status, payload=None):
+        err = payload.get('error') if isinstance(payload, dict) else None
+        slug = str((err or {}).get('slug') or '') if isinstance(err, dict) else ''
+        print(f'composio sign-in: {step} status={status} {slug}'.rstrip(), file=sys.stderr, flush=True)
+
+    def _works(self, key, tries=4):
+        """A fresh project key can take a few seconds to be accepted: check it a few times."""
+        for attempt in range(tries):
+            status, payload = self.transport('GET', API + '/connected_accounts?limit=1', key, None)
+            self._log('check_key', status, payload)
+            if status < 400:
+                return True
+            if status not in (401, 403, 429) and status < 500:
+                return False
+            if attempt < tries - 1:
+                self.sleep(2 + attempt * 2)
+        return False
+
     def project_key(self, user_key):
-        """The project API key for the signed-in Composio account (read or minted once). Never returns the user key."""
-        auth = {'x-user-api-key': user_key}
+        """The project API key for the signed-in Composio account (read or minted once). Never returns the user key.
+
+        Mirrors the Composio CLI: session/info by user key, then again scoped to its org and project, then mint."""
+        auth = {**self.CLI_HEADERS, 'x-user-api-key': user_key}
         status, info = self._call('GET', '/api/v3.1/auth/session/info', headers=auth)
+        self._log('session_info', status, info)
         if status >= 400:
             raise _error(status, info)
-        found = info.get('api_key') if isinstance(info.get('api_key'), dict) else {}
-        key = found.get('key')
-        if isinstance(key, str) and key != user_key and KEY_SHAPE.match(key) and not key.startswith('uak_'):
-            return key
         project = info.get('project') if isinstance(info.get('project'), dict) else {}
         org = project.get('org') if isinstance(project.get('org'), dict) else {}
         pid, oid = str(project.get('nano_id') or project.get('id') or ''), str(org.get('id') or '')
-        if not (NANO_ID.match(pid) and NANO_ID.match(oid)):
+        scoped = {**auth, 'x-org-id': oid, 'x-project-id': pid} if NANO_ID.match(pid) and NANO_ID.match(oid) else None
+        candidates = []
+        if scoped:
+            status2, info2 = self._call('GET', '/api/v3.1/auth/session/info', headers=scoped)
+            self._log('session_info_scoped', status2, info2)
+            if status2 < 400:
+                candidates.append(info2)
+        candidates.append(info)
+        seen = set()
+        for source in candidates:
+            found = source.get('api_key') if isinstance(source.get('api_key'), dict) else {}
+            key = found.get('key')
+            if isinstance(key, str) and key != user_key and key not in seen and KEY_SHAPE.match(key) and not key.startswith('uak_'):
+                seen.add(key)
+                if self._works(key, tries=2):
+                    return key
+        if not scoped:
             raise ComposioError('unavailable', 'Composio did not say which project to use. Paste a key instead.', 502)
         status, made = self._call('POST', f'/api/v3/org/project/{urllib.parse.quote(pid, safe="")}/api_keys/create',
-                                  {'name': 'wizard-' + time.strftime('%Y-%m-%d')}, {**auth, 'x-org-id': oid, 'x-project-id': pid})
+                                  {'name': 'wizard-' + time.strftime('%Y-%m-%d')}, scoped)
+        self._log('create_key', status, made)
         key = _find_key(made, user_key) if status < 400 else None
         if not key:
             raise _error(status, made) if status >= 400 else ComposioError(
                 'unavailable', 'Composio did not hand over a key. Paste a key instead.', 502)
+        if not self._works(key):
+            raise ComposioError('key_invalid', 'Composio made a key but does not accept it yet. Try again in a minute.', 401)
         return key
 
 
