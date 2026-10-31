@@ -1,0 +1,6 @@
+{
+  "request": "Connect Outlook mail and calendar: Quick connect through Composio or your own Microsoft Entra app",
+  "template": "hello-wizard",
+  "state": "local_draft",
+  "name": "Microsoft"
+}

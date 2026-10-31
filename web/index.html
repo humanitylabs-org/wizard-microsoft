@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en" data-app="wizard-microsoft">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <meta name="referrer" content="no-referrer">
+  <title>Microsoft</title>
+  <script src="boot.js"></script>
+  <link rel="stylesheet" href="wizard-tokens.css">
+  <link rel="stylesheet" href="wizard-ui.css">
+  <link rel="stylesheet" href="standalone.css">
+  <link rel="stylesheet" href="styles.css">
+  <script defer src="/wizard-os-home/core/app-client.js"></script>
+  <script defer src="wizard-sheet.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div class="wz-app">
+    <header class="wz-head"><h1>Microsoft</h1></header>
+    <main class="wz-scroll" id="view" aria-live="polite"></main>
+    <p id="status" class="wz-status" role="status"></p>
+  </div>
+  <dialog id="sheet" class="wz-sheet" aria-labelledby="sheet-title"></dialog>
+</body>
+</html>

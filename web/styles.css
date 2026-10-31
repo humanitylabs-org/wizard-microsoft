@@ -1,0 +1,83 @@
+/* Microsoft app: app-specific styles only. Kit variables, no colours of its own. Status card, rows, pills, checks and
+ * the sheet come from wizard-ui.css. Titles are sentence case (no uppercase eyebrows on forms). */
+[hidden] { display: none !important; }
+.wz-scroll { padding-bottom: 28px; }
+.muted { color: var(--ink-3); font-size: var(--wz-text-sm, .8125rem); margin: 0 0 10px; }
+.intro { color: var(--ink-2); font-size: var(--wz-text-md, .875rem); margin: 2px 8px 12px; line-height: 1.5; }
+.pad { padding: 8px; }
+.chev { flex: none; color: var(--ink-3); font-size: 1.25rem; padding: 0 4px; }
+.wz-tile { font-weight: 700; color: var(--accent); }
+.mark { color: var(--accent); background: var(--accent-soft); }
+.mark svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+a.wz-button { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+.wz-button.small { min-height: 34px; padding: 4px 12px; font-size: var(--wz-text-sm, .8125rem); }
+.wz-button.danger { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.wz-chip.linkish { text-decoration: none; color: var(--accent); min-height: 32px; }
+.conn-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.accounts { padding: 2px 0; }
+.account { border: 1px solid var(--line); border-radius: var(--r); background: var(--fill); overflow: hidden; }
+.account > .wz-row:first-child { border-bottom: 1px solid var(--line); }
+.account .wz-row .wz-pill { flex: none; }
+.toggle { gap: 8px; }
+.toggle:disabled { opacity: .5; cursor: default; }
+.toggle[aria-pressed="true"] .wz-main b { color: var(--ink); }
+.primary { display: grid; gap: 6px; padding: 14px 0 4px; }
+.primary .wz-button { width: 100%; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 0 2px; }
+.label-form .wz-field { width: 100%; }
+.sec-title { margin: 0; padding: 12px 8px 4px; font-size: .9375rem; font-weight: 650; color: var(--ink); }
+.sec-note { margin: 0; padding: 2px 8px 6px; font-size: var(--wz-text-sm, .8125rem); color: var(--ink-3); line-height: 1.45; }
+.quick-note { margin: 2px 8px 14px; padding: 12px 14px; border-radius: var(--r); background: var(--fill); color: var(--ink-2); font-size: var(--wz-text-md, .875rem); line-height: 1.5; }
+.key-form { display: grid; gap: 6px; padding: 8px 8px 0; }
+.key-form label { font-size: var(--wz-text-sm, .8125rem); font-weight: 650; color: var(--ink-2); margin-top: 4px; }
+.key-form .wz-field { width: 100%; flex: none; }
+.key-form .hint { margin: 0; font-size: var(--wz-text-sm, .8125rem); color: var(--ink-3); }
+.key-form .hint.bad { color: var(--danger); }
+.key-form .actions { margin-top: 6px; }
+.key-row { display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px; }
+.key-row + .key-row { border-top: 1px solid var(--line); }
+.key-row .wz-main { flex: 1; min-width: 0; display: grid; gap: 3px; }
+.key-row .wz-main b { font-size: .9375rem; font-weight: 600; overflow-wrap: anywhere; }
+.key-row .wz-main small { font-size: var(--wz-text-sm, .8125rem); color: var(--ink-3); overflow-wrap: anywhere; }
+.key-row .wz-pill { flex: none; }
+.key-row .rm[data-armed="1"] { color: var(--danger); }
+@container wz-app (max-width: 479px) {
+  .key-row { flex-wrap: wrap; }
+  .key-row .wz-main { flex-basis: calc(100% - 56px); }
+  .key-row .wz-pill { margin-left: 52px; }
+  .key-row .rm { margin-left: auto; }
+}
+/* crumb */
+.crumb { display: flex; align-items: center; gap: 4px; padding: 6px 0; }
+.crumb h2 { margin: 0; font-size: 1.125rem; font-weight: 700; overflow-wrap: anywhere; }
+.back { flex: none; width: 44px; height: 44px; border-radius: var(--r); font-size: 1.75rem; line-height: 1; color: var(--ink-2); }
+.back:hover { background: var(--fill); }
+/* guided steps */
+.steps { list-style: none; margin: 0; padding: 0 2px; display: flex; flex-direction: column; gap: 8px; }
+.step { border: 1px solid var(--line); border-radius: var(--r); background: var(--fill); }
+.step.current { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.step-head { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 56px; padding: 10px 12px; text-align: left; }
+.num { flex: none; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-size: var(--wz-text-md, .875rem); font-weight: 700; border: 2px solid var(--line-2); color: var(--ink-2); }
+.step.current .num { border-color: var(--accent); color: var(--accent); }
+.step.done .num { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.step-title { flex: 1; font-weight: 600; font-size: .9375rem; }
+.where { flex: none; font-size: .75rem; padding: 2px 8px; }
+.step-body { padding: 0 14px 14px 54px; }
+.step-body .key-form { padding: 8px 0 0; }
+.detail { margin: 0 0 8px; padding-left: 18px; color: var(--ink-2); font-size: var(--wz-text-md, .875rem); line-height: 1.45; }
+.detail li { margin: 4px 0; }
+.copy { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 10px 0 0; padding: 10px 12px; border-radius: var(--r-tile); border: 1px solid var(--line); }
+.copy small { width: 100%; color: var(--ink-3); font-size: .75rem; }
+.copy code { flex: 1; min-width: 0; font: .8125rem/1.35 var(--wz-font-mono); color: var(--ink); overflow-wrap: anywhere; user-select: all; }
+.foot { display: flex; flex-wrap: wrap; gap: 8px; padding: 14px 4px 0; }
+@container wz-app (max-width: 479px) { .step-body { padding: 0 12px 12px; } }
+/* sheet */
+.wz-sheet h2 { margin: 0 0 8px; font-size: 1.125rem; }
+.spinner { width: 28px; height: 28px; margin: 12px auto; border-radius: 50%; border: 3px solid var(--line-2); border-top-color: var(--accent); animation: spin 900ms linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.wz-more .sec-title { padding-top: 14px; }
+/* Standalone light fallback (no host appearance yet): derive sheet surfaces from the light base. */
+@media (prefers-color-scheme: light) {
+  html:not([data-color-scheme]):not(.wz-hosted) { --wz-overlay: color-mix(in srgb, var(--wz-base) 96%, transparent); }
+}
