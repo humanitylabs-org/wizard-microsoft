@@ -54,16 +54,23 @@ routes, same-origin on the shell (`/wizard-google/…`, `/wizard-microsoft/…`)
 |---|---|
 | `POST api/session` | Session cookie (path = the source's path) + CSRF token. |
 | `GET api/home` | Accounts and Quick connect readiness (`quick.ready`, never a key). |
-| `POST api/quick/flow` `{services?, account?}` | Starts Quick connect: `{flow, go}`. Adds "Sign in to Composio" first when no key works. |
-| `GET api/quick/flow?flow=` | Moves the flow on and reports `{state, where, step, label, steps[], connected[], result, error, go}`. |
+| `POST api/quick/flow` `{services?, account?}` | Starts Quick connect: `{flow, go, go_out, steps}`. Adds "Sign in to Composio" first when no key works. |
+| `GET api/quick/flow?flow=` | Moves the flow on and reports `{state, where, step, label, steps[], connected[], result, error, go, go_out}`. |
 | `POST api/quick/flow/cancel` `{flow}` | Stops it. |
-| `GET quick/go/<flow>` | The popup page: redirects to Composio's sign-in, then each provider sign-in, then says Connected and closes. |
+| `GET quick/go/<flow>` | The sign-in window. Composio step: a small page whose button opens Composio's sign-in in a popup and moves on by itself once the key has landed (`signin.js`). Provider steps: redirects to the Composio connect link, which returns here; then says Connected and closes. |
+| `GET signin.js`, `close.js` | Scripts of those pages. |
 
-Front end recipe: on the tap, `window.open('', '_blank')` (keep the handle), POST `api/quick/flow`, point the window at
-`go`, then poll `api/quick/flow` every 1.5 s. While `where` is `composio` the window sits on Composio's own page; when a
-poll reports any other `where`, set the window's location to `go` again (Composio's page does not redirect back). On
-`state: done` close the window and reload accounts. If the window was blocked or closed, offer a Continue button that opens
-`go` again (a new tap).
+`go_out` is the same page on another of the box's trusted ports (for example `:8796` when Wizard runs on `:8444`).
+Wizard keeps windows for its own address inside Wizard (an app sheet), where Google, Microsoft and Composio refuse to
+sign in; a window for another address is handed to the browser (or the phone's browser in the Android app). The session
+cookie is per host, not per port, so the window is still the owner's.
+
+Front end recipe (Mail and Calendar use `connect.js`): POST `api/quick/flow` as soon as the owner opens the Quick
+connect choice, so the tap itself can call `window.open(go_out, '_blank', 'noopener')` (a window opened after an
+`await` is blocked). Poll `api/quick/flow` every 1.5 s to show progress; the window moves itself from Composio to the
+provider and closes at the end. On `state: done` reload accounts. Offer an "Open the window again" link to `go_out`
+(a new tap) in case the window was closed. Running outside Wizard, a blank tab opened in the tap and pointed at `go`
+works too.
 
 ## Rules every source keeps
 

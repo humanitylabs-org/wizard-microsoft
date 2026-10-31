@@ -21,8 +21,15 @@ from service import Problem, Service  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
-VERSION = '0.2.0'
-ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css', 'close.js'}
+VERSION = '0.2.1'
+ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css', 'close.js', 'signin.js'}
+def out_origin(trusted, host, own):
+    """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
+    Quick connect window opens here instead: a real browser window where Google, Microsoft and Composio allow sign-in."""
+    name = (host or '').split(':')[0].lower()
+    others = sorted(o for o in trusted if o.startswith('https://') and o != own and urllib.parse.urlsplit(o).hostname == name and urllib.parse.urlsplit(o).port)
+    return others[0] if others else own
+
 FORWARDING = ('X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded', 'X-Real-IP')
 SESSION_TTL = 8 * 3600
 MAX_BODY = 128_000
@@ -194,6 +201,21 @@ def handler_for(app):
             self.send_header('Content-Length', '0')
             self.end_headers()
 
+        def send_signin(self, target, flow):
+            # The Composio step: Composio's page never returns, so signin.js opens it in a small window and moves on.
+            esc = lambda s: s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+            raw = (f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+                   f'<title>Sign in to Composio</title><link rel="stylesheet" href="../../wizard-tokens.css"><link rel="stylesheet" href="../../wizard-ui.css"><link rel="stylesheet" href="../../standalone.css">'
+                   f'<body><main class="wz-empty" id="signin" data-target="{esc(target)}" data-flow="{esc(flow)}"><strong>Sign in to Composio</strong>'
+                   f'<p id="signin-note">Quick connect uses a free Composio account. Sign in or create one; Wizard saves the key by itself.</p>'
+                   f'<p><a class="wz-button" id="signin-go" href="{esc(target)}">Sign in to Composio</a></p></main>'
+                   f'<script src="../../signin.js"></script></body></html>').encode()
+            self.send_response(200)
+            self.headers_common('text/html; charset=utf-8')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def send_done(self, title, message, close):
             # The popup's last page. close.js closes it when the app opened it; the opener also closes it.
             esc = lambda s: s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
@@ -207,6 +229,11 @@ def handler_for(app):
             self.send_header('Content-Length', str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
+
+        def flow_links(self, host, flow):
+            shell = app.shell_path_for(host)
+            out = out_origin(config.trusted_origins, host, config.origin_for(host))
+            return {'go': shell + 'quick/go/' + flow, 'go_out': out + shell + 'quick/go/' + flow if out else None}
 
         def flow_base(self, host):
             origin = config.origin_for(host) or f'http://{host}'
@@ -333,6 +360,8 @@ def handler_for(app):
                         view, target = app.service.flow_step(self.session(), go.group(1), self.flow_base(host))
                     except Problem as problem:
                         return self.send_done('Not connected', problem.message, False)
+                    if target and view.get('where') == 'composio':
+                        return self.send_signin(target, go.group(1))
                     if target:
                         return self.send_redirect(target)
                     if view['state'] == 'done':
@@ -347,7 +376,7 @@ def handler_for(app):
                         if not re.fullmatch(r'qf-[A-Za-z0-9_-]{8,40}', flow):
                             raise Problem(400, 'invalid_flow', 'Unknown sign-in.')
                         view, _ = app.service.flow_step(session, flow, self.flow_base(host))
-                        return self.send_json(200, {**view, 'go': app.shell_path_for(host) + 'quick/go/' + flow})
+                        return self.send_json(200, {**view, **self.flow_links(host, flow)})
                     if path == '/api/home':
                         return self.send_json(200, app.service.home(self.redirect_uri(host), session))
                     if path == '/api/own/status':
@@ -404,7 +433,7 @@ def handler_for(app):
                     '/api/own/start': lambda: s.start_own(session, self.redirect_uri(host), body.get('account')),
                     '/api/quick/keys': lambda: s.add_key(body.get('key'), body.get('label')),
                     '/api/quick/start': lambda: s.start_quick(session, body.get('account'), shell + 'quick/callback'),
-                    '/api/quick/flow': lambda: (lambda f: {**f, 'go': app.shell_path_for(host) + 'quick/go/' + f['flow']})(
+                    '/api/quick/flow': lambda: (lambda f: {**f, **self.flow_links(host, f['flow'])})(
                         s.flow_begin(session, body.get('account'))),
                     '/api/quick/flow/cancel': lambda: s.flow_cancel(session, body.get('flow')),
                 }

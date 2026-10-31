@@ -536,6 +536,22 @@ class HttpTests(unittest.TestCase):
         base = {'Origin': origin, 'Cookie': cookie.split(';')[0], 'X-CSRF-Token': value['csrf'], **extra}
         return lambda method, path, body=None: self.send(method, path, body, base, host)
 
+    def test_quick_window_uses_the_boxs_other_address(self):
+        trusted = {'https://box.ts.net:8444', 'https://box.ts.net:8796', 'https://other.example:8000'}
+        self.assertEqual(server.out_origin(trusted, 'box.ts.net:8444', 'https://box.ts.net:8444'), 'https://box.ts.net:8796')
+        self.assertEqual(server.out_origin({'https://box.ts.net:8444'}, 'box.ts.net:8444', 'https://box.ts.net:8444'), 'https://box.ts.net:8444')
+        call = self.owner()
+        status, started, _ = call('POST', '/api/quick/flow', {})
+        self.assertEqual(status, 200, started)
+        self.assertTrue(started['go_out'].endswith('/quick/go/' + started['flow']))
+        view = call('GET', '/api/quick/flow?flow=' + started['flow'])[1]
+        status, page, _ = call('GET', started['go'])
+        if view['where'] == 'composio':
+            self.assertIn('id="signin"', page)
+            self.assertIn('../../signin.js', page)
+        call('POST', '/api/quick/flow/cancel', {'flow': started['flow']})
+        self.assertIn('Composio', self.send('GET', '/signin.js')[1])
+
     def test_healthz_and_page(self):
         self.assertEqual(self.send('GET', '/healthz')[1]['version'], server.VERSION)
         status, page, _ = self.send('GET', '/')
