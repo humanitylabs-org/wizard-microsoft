@@ -654,6 +654,31 @@ class HttpTests(unittest.TestCase):
                                                               'Tailscale-User-Login': 'stranger@example.com'}, 'box.example:8444')
         self.assertEqual(status, 401)
 
+    def test_unset_owner_logins_admit_no_tailnet_login(self):
+        """With WIZARD_OWNER_LOGINS empty, a tailnet login is not owner proof (it used to accept any login with '@')."""
+        d = tempfile.mkdtemp()
+        try:
+            config = server.Config({'DATA_DIR': d, 'PORT': '0', 'WIZARD_TRUSTED_HOSTS': 'box.example'})
+            srv, _ = server.serve(config, server.App(config, http=FakeMicrosoft(), composio_transport=FakeComposio(FakeGraph())))
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                for login in ('stranger@example.com', 'owner@example.com'):
+                    conn = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
+                    conn.request('POST', '/api/session', b'{}', {'Host': 'box.example:8444', 'Origin': 'https://box.example:8444',
+                                                                   'X-Wizard-Request': 'bootstrap', 'Content-Type': 'application/json',
+                                                                   'Tailscale-User-Login': login})
+                    r = conn.getresponse()
+                    body = json.loads(r.read())
+                    conn.close()
+                    self.assertEqual(r.status, 401, (login, body))
+                    self.assertEqual(body['error']['code'], 'owner_login_not_configured')
+                    self.assertIsNone(r.getheader('Set-Cookie'))
+            finally:
+                srv.shutdown()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
     def test_box_api_and_mcp(self):
         for headers in ({'Origin': 'http://x'}, {'X-Forwarded-For': '1.2.3.4'}, {'Tailscale-User-Login': 'a@b'}, {'Cookie': 'wm_session=x'}):
             self.assertEqual(self.send('POST', '/v1/mail_search', {}, headers)[0], 403, headers)

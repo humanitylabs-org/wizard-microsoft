@@ -267,9 +267,14 @@ def handler_for(app):
                 if supplied and hmac.compare_digest(supplied, config.owner_token):
                     return host
             if config.shell_auth == 'tailscale-serve' and host not in config.local_hosts:
+                # Only the box owner's own tailnet login. With no owner login configured, no tailnet login is enough:
+                # any member of the tailnet (a shared user, a guest device) would otherwise read the owner's mail.
+                # The App Manager writes WIZARD_OWNER_LOGINS at install; the owner token still works without it.
                 logins = [x.strip().lower() for x in self.headers.get_all('Tailscale-User-Login') or []]
-                if len(logins) == 1 and (logins[0] in config.owner_logins or (not config.owner_logins and '@' in logins[0])):
+                if config.owner_logins and len(logins) == 1 and logins[0] in config.owner_logins:
                     return host
+                if not config.owner_logins:
+                    raise Problem(401, 'owner_login_not_configured', 'This app does not know its owner yet. Update it from your Wizard.')
                 raise Problem(401, 'owner_login_required', 'Open this app from your Wizard as its owner.')
             raise Problem(401, 'owner_required', 'Open this app from your Wizard.')
 
