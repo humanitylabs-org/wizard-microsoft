@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import graph  # noqa: E402
 from service import Problem, Service  # noqa: E402
-from agent_access import AppGrants, SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # noqa: E402
+from agent_access import AppGrants, SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS, AccessRefused, GatewayGrant, resolve_caller  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
@@ -139,7 +139,7 @@ def rpc(app, message, caller):
         if not isinstance(args, dict):
             raise Problem(400, 'invalid_arguments', 'Arguments must be an object.')
         if name == 'microsoft_status':
-            value = app.service.status()
+            value = app.service.status(caller)
         elif name in graph.TOOLS or name in SUGGESTION_TOOLS:
             value = app.service.call_tool(caller, name, args)
         else:
@@ -157,6 +157,8 @@ class App:
         self.service = service or Service(config.data_dir, http=http, composio_transport=composio_transport)
         self.sessions = Sessions()
         self.grants = AppGrants(config.grants_file)
+        # The Agent Service gateway's grant (`from: host:agent-service` in the same file): the only proof of which agent calls.
+        self.gateway = GatewayGrant(config.grants_file)
 
     def shell_path_for(self, host):
         return '/' if host in self.config.local_hosts else self.config.shell_path
@@ -296,18 +298,15 @@ def handler_for(app):
             host = (self.headers.get('Host') or '').lower()
             supplied = self.headers.get('Authorization', '')
             if config.admin_token and supplied and hmac.compare_digest(supplied, 'Bearer ' + config.admin_token):
-                pass
-            elif not (host in config.local_hosts and not supplied):
+                return 'agent:main'  # the owner's own MCP secret: the main agent's level, never a claimed name
+            if not (host in config.local_hosts and not supplied):
                 raise Problem(401, 'not_box_local', 'This API is for agents and apps on this box.')
-            # A Wizard app acting for the owner (Mail's Send button) proves itself with its App Manager grant. Apps send it
-            # only for requests from the owner's signed-in screen; anything else here is an agent at the owner's level.
-            via_grant = app.grants.caller(self.headers.get('X-Wizard-Grant', ''))
-            if via_grant:
-                return 'app:' + via_grant
-            agent = (self.headers.get('X-Wizard-Agent') or 'main').strip().lower()
-            if not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,62}', agent):
-                raise Problem(400, 'invalid_agent', 'Invalid agent name.')
-            return 'agent:' + agent
+            # Who is calling comes from a grant, never from a name the caller gives (agent_access.resolve_caller): the
+            # gateway's grant names the agent; Mail's / Calendar's grant alone is the owner's tap in that app.
+            try:
+                return resolve_caller(self.headers, app.grants, app.gateway, app.service.access)
+            except AccessRefused as refused:
+                raise Problem(refused.status, refused.code, refused.message) from None
 
         def body(self):
             if (self.headers.get('Content-Type') or '').split(';')[0].strip().lower() != 'application/json':
@@ -339,10 +338,10 @@ def handler_for(app):
                     self.host()
                     return self.send_json(200, {'ok': True, 'app': APP_ID, 'version': VERSION})
                 if path in ('/api/connection', '/v1/status'):
-                    self.box_caller() if path == '/v1/status' else self.host()
+                    caller = self.box_caller() if path == '/v1/status' else self.host()
                     if any(self.headers.get(x) for x in FORWARDING) or any(k.lower().startswith(('tailscale-', 'cf-')) for k in self.headers.keys()):
                         raise Problem(403, 'box_only', 'Box-only route.')
-                    return self.send_json(200, app.service.connection() if path == '/api/connection' else app.service.status())
+                    return self.send_json(200, app.service.connection() if path == '/api/connection' else app.service.status(caller))
                 if path == '/oauth/callback':
                     self.owner()
                     try:
