@@ -1,22 +1,31 @@
 """Agent access to the owner's mail and calendar: owner-chosen levels, enforced here for every agent call.
 
 Shared byte-for-byte by the Google and Microsoft apps (copy it after every change). Modelled on Wizard Messenger's
-agent levels.
+agent levels (wizard-messenger `wizard_agents.py`), with the same names and wording.
 
-Mail: No access, Read-only and Draft only (recommended, the default). Levels for agents stop at Draft only, so nothing
-here lets an agent send mail. The owner sends from Mail.
+Mail: one level per agent, as in Messenger: No access, Read-only, Draft-only (recommended) and Draft-and-send. An agent
+the owner has not picked a level for is No access. On the update that brought per-agent levels the main agent keeps
+the one level every agent had before (Draft-only when the owner never changed it), so nothing changes for an existing
+owner until he picks again; on a fresh install the main agent starts at No access like every other agent.
 
-Calendar: No access, Read-only, Suggest only (recommended, the default) and Can edit. At Suggest only an agent's
-create / update / delete / respond call changes nothing: it is kept here as a pending suggestion that Calendar shows
-with Approve / Dismiss, and only the owner's tap there applies it.
+Calendar: one level for every agent: No access, Read-only, Suggest only (recommended, the default) and Can edit. At
+Suggest only an agent's create / update / delete / respond call changes nothing: it is kept here as a pending
+suggestion that Calendar shows with Approve / Dismiss, and only the owner's tap there applies it.
 
-Front ends (Mail, Calendar) prove they act for the owner with their App Manager grant (X-Wizard-Grant, hashed in this
-app's grants file as `from: <app id>`), sent only for requests made by the owner's signed-in screen; such app callers
-are not limited by the agent levels. Only the owner's signed-in screen (this app's page, or Mail / Calendar Settings
-through this app's owner routes) can change a level.
+Who is calling (`resolve_caller`), never from what the caller says about itself:
+- The Agent Service gateway proves itself with its grant key (`X-Wizard-Grant`, hashed in this app's grants file as
+  `from: host:agent-service`, wizard-os spec/PERMISSIONS.md layer 2). Only then is `X-Wizard-Agent` believed; the
+  gateway sets it from each agent's own gateway token.
+- Front ends (Mail, Calendar) prove themselves with their App Manager grant (`from: <app id>`). Without `X-Wizard-Agent`
+  the request is the owner's own tap in that app and is not limited by agent levels; with it, the app is relaying an
+  agent it has itself verified through the gateway, and that agent's level applies.
+- Anything else on this box (a bare call, or a self-declared `X-Wizard-Agent`) is refused once the gateway's row is in
+  the grants file. Until the box has that row (older App Managers do not write it) a bare call is the main agent, at
+  the main agent's level, whatever name it gives: no caller can borrow another agent's level.
 
-Application defense in depth, not protection against host root: an agent with shell access to the box can read
-the files that hold grants. Messenger documents the same boundary.
+Only the owner's signed-in screen (this app's page, or Mail / Calendar Settings through this app's owner routes) can
+change a level. Application defense in depth, not protection against host root: an agent with shell access to the
+box's Wizard files can read the keys. Messenger documents the same boundary.
 """
 import datetime
 import hashlib
@@ -29,17 +38,21 @@ import stat
 import threading
 import time
 from pathlib import Path
+from urllib.parse import unquote
 
-LEVELS = ('no_access', 'read_only', 'draft_only')
-DEFAULT = 'draft_only'
-LABELS = {'no_access': 'No access', 'read_only': 'Read-only', 'draft_only': 'Draft only'}
-WHAT = {'no_access': 'Agents can\'t read your mail.',
-        'read_only': 'Agents read and search your mail. They can\'t draft or send.',
-        'draft_only': 'Agents read, sort and write drafts. Only you send, from Mail.'}
+LEVELS = ('no_access', 'read_only', 'draft_only', 'draft_and_send')
+DEFAULT = 'draft_only'      # recommended; and the main agent's level when an existing owner never changed it
+NEW_AGENT = 'no_access'     # every agent the owner has not picked a level for
+LABELS = {'no_access': 'No access', 'read_only': 'Read-only', 'draft_only': 'Draft-only', 'draft_and_send': 'Draft-and-send'}
+# Messenger's wording (Settings > Agent access), for mail.
+WHAT = {'no_access': 'Can\'t read your mail.',
+        'read_only': 'Reads mail. Can\'t draft.',
+        'draft_only': 'Reads and drafts. Only you send.',
+        'draft_and_send': 'Reads and sends without your review.'}
 RANK = {level: n for n, level in enumerate(LEVELS)}
-# What each mail tool needs. None: agents never get it (sending is the owner's tap in Mail).
+# What each mail tool needs.
 MAIL_TOOLS = {'mail_search': 'read_only', 'mail_get': 'read_only', 'mail_update': 'draft_only', 'mail_draft': 'draft_only',
-              'mail_send': None}
+              'mail_send': 'draft_and_send'}
 
 CAL_LEVELS = ('no_access', 'read_only', 'suggest_only', 'can_edit')
 CAL_DEFAULT = 'suggest_only'
@@ -54,9 +67,14 @@ CAL_READ = ('calendar_list_events',)
 CAL_WRITES = ('calendar_create_event', 'calendar_update_event', 'calendar_delete_event', 'calendar_respond')
 # Pending suggestions: agents (Suggest only and up) may list them; approving and dismissing is the owner's tap.
 SUGGESTION_TOOLS = ('calendar_suggestions', 'calendar_suggestion_approve', 'calendar_suggestion_dismiss')
-OWNER_ONLY = ('mail_send', 'calendar_suggestion_approve', 'calendar_suggestion_dismiss')
+OWNER_ONLY = ('calendar_suggestion_approve', 'calendar_suggestion_dismiss')
 
 APP_ID = re.compile(r'[a-z0-9][a-z0-9-]{1,40}')  # app ids only: a gateway row such as "host:agent-service" never matches
+GATEWAY = 'host:agent-service'  # outside the app-ID namespace: no app grant can produce this row
+MAIN = 'main'
+MAIN_NAMES = ('main', 'hermes')  # the gateway calls the main agent "hermes"; older callers said "main"
+AGENT_ID = re.compile(r'[a-z0-9][a-z0-9_-]{0,63}')
+MAX_AGENTS = 32
 SHA256_HEX = re.compile(r'[0-9a-f]{64}')
 KEY_RE = re.compile(r'[A-Za-z0-9_.~+/=-]{16,512}')
 SUGGESTION_ID = re.compile(r'sg_[0-9a-f]{16}')
@@ -64,8 +82,8 @@ MAX_GRANTS_FILE = 256 * 1024
 MAX_SUGGESTIONS = 50
 MAX_SUGGESTION_ARGS = 16_000
 SUGGESTION_DAYS = 30
-SEND_REFUSED = ('Agents can\'t send mail on this Wizard (Mail > Settings > Agent access). Write it with mail_draft; '
-                'the owner reads and sends it from Mail.')
+SEND_REFUSED = ('{name} is {label} for mail (Mail > Settings > Agent access), so it can\'t send. Write it with '
+                'mail_draft; the owner reads and sends it from Mail.')
 APPROVE_REFUSED = 'Only the owner approves or dismisses suggestions, in Calendar.'
 
 
@@ -76,17 +94,37 @@ class AccessRefused(Exception):
 
 
 def is_agent(caller):
-    """Agents (MCP, the box-only /v1 mirror without an app grant) as opposed to an app acting for the owner."""
+    """Agents (MCP, the box-only /v1 mirror, or an agent relayed by Mail / Calendar) as opposed to an app acting for
+    the owner."""
     return not str(caller or '').startswith('app:')
 
 
-class AgentAccess:
-    """The levels live in DATA_DIR/agent-access.json (0600): {"version": 1, "mail": .., "calendar": ..}.
-    Missing file or key = the default; unreadable or corrupt file = No access for both."""
+def agent_id(caller):
+    """'agent:<id>' -> '<id>' with the main agent's names folded into 'main'."""
+    ident = str(caller or '').split(':', 1)[-1] if str(caller or '').startswith('agent:') else ''
+    return MAIN if ident in MAIN_NAMES else ident
 
-    def __init__(self, data_dir):
+
+def clean_label(value, fallback):
+    try:
+        text = unquote(str(value or ''))
+    except Exception:  # noqa: BLE001
+        text = ''
+    text = ' '.join(re.sub(r'[\x00-\x1f\x7f]', ' ', text).split())[:60]
+    return text or fallback
+
+
+class AgentAccess:
+    """The levels live in DATA_DIR/agent-access.json (0600):
+    {"version": 1, "mail": <main agent's level, kept for older readers>, "calendar": ..,
+     "agents": {"<id>": {"mail": <level>, "label": "..", "last_used": <ms>}}}.
+    No "agents" yet (an older version wrote the file) = the main agent at the shared "mail" level, every other agent
+    No access. Unreadable or corrupt file = No access for everyone."""
+
+    def __init__(self, data_dir, clock=time.time):
         self.path = Path(data_dir) / 'agent-access.json'
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
+        self.clock = clock
 
     def _doc(self):
         """The saved levels, or None when the file can't be trusted."""
@@ -100,14 +138,52 @@ class AgentAccess:
             value = json.loads(raw)
         except ValueError:
             return None
-        return value if isinstance(value, dict) and value.get('version') == 1 else None
+        if not isinstance(value, dict) or value.get('version') != 1:
+            return None
+        if 'agents' in value and not isinstance(value['agents'], dict):
+            return None
+        return value
 
-    def level(self):
+    def _write(self, doc):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name('.agent-access.tmp')
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            json.dump(doc, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, self.path)
+
+    def migrate(self, existing):
+        """Once, on the first start with per-agent levels. `existing`: this app already had accounts or a client (an
+        update, not a fresh install). The main agent keeps the level every agent had; a fresh install starts it at No
+        access. A corrupt file is left alone (everyone stays No access until the owner picks)."""
+        with self.lock:
+            doc = self._doc()
+            if doc is None or 'agents' in doc:
+                return
+            had_file = self.path.exists()
+            main = doc.get('mail', DEFAULT) if (had_file or existing) else NEW_AGENT
+            main = main if main in LEVELS else NEW_AGENT
+            self._write({'version': 1, 'mail': main, 'calendar': doc.get('calendar', CAL_DEFAULT),
+                         'agents': {MAIN: {'mail': main, 'label': '', 'last_used': None}}})
+
+    def _agents(self, doc):
+        rows = doc.get('agents')
+        if rows is None:  # not migrated: the main agent has the one shared level
+            legacy = doc.get('mail', DEFAULT)
+            return {MAIN: {'mail': legacy if legacy in LEVELS else NEW_AGENT, 'label': '', 'last_used': None}}
+        return {k: v for k, v in rows.items() if AGENT_ID.fullmatch(str(k)) and isinstance(v, dict)}
+
+    def level(self, caller=None):
+        """The mail level of one agent (default: the main agent)."""
         doc = self._doc()
         if doc is None:
             return 'no_access'
-        level = doc.get('mail', DEFAULT)
-        return level if level in LEVELS else 'no_access'  # a corrupt file fails closed
+        ident = agent_id(caller) if caller else MAIN
+        level = self._agents(doc).get(ident, {}).get('mail', NEW_AGENT)
+        return level if level in LEVELS else 'no_access'  # a corrupt entry fails closed
 
     def calendar_level(self):
         doc = self._doc()
@@ -116,45 +192,86 @@ class AgentAccess:
         level = doc.get('calendar', CAL_DEFAULT)
         return level if level in CAL_LEVELS else 'no_access'
 
-    def set(self, level=None, calendar=None):
-        """Owner only. `level` is mail's level (kept for older callers); `calendar` the calendar level."""
+    def seen(self, caller, label=None):
+        """A verified agent called: remember it (at No access when new) so the owner sees it in Settings."""
+        ident = agent_id(caller)
+        if not AGENT_ID.fullmatch(ident or ''):
+            return
+        with self.lock:
+            doc = self._doc()
+            if doc is None:
+                return
+            rows = self._agents(doc)
+            now = int(self.clock() * 1000)
+            row = rows.get(ident)
+            fresh = clean_label(label, '') if label else ''
+            if row is None:
+                if len(rows) >= MAX_AGENTS:
+                    return
+                row = rows[ident] = {'mail': NEW_AGENT, 'label': fresh, 'last_used': now}
+            elif (fresh and row.get('label') != fresh) or not isinstance(row.get('last_used'), int) or now - row['last_used'] > 60000:
+                row['label'] = fresh or row.get('label', '')
+                row['last_used'] = now
+            else:
+                return
+            try:
+                self._write({**doc, 'version': 1, 'mail': rows.get(MAIN, {}).get('mail', NEW_AGENT), 'agents': rows})
+            except OSError:
+                pass
+
+    def set(self, level=None, calendar=None, agent=None):
+        """Owner only. `level` is one agent's mail level (`agent`, default the main agent: an older Mail sends a bare
+        level for "agents"); `calendar` the calendar level."""
         if level is None and calendar is None:
             raise AccessRefused(400, 'invalid_level', 'Choose a level.')
         if level is not None and level not in LEVELS:
-            raise AccessRefused(400, 'invalid_level', 'Choose No access, Read-only or Draft only.')
+            raise AccessRefused(400, 'invalid_level', 'Choose No access, Read-only, Draft-only or Draft-and-send.')
         if calendar is not None and calendar not in CAL_LEVELS:
             raise AccessRefused(400, 'invalid_level', 'Choose No access, Read-only, Suggest only or Can edit.')
+        ident = MAIN if agent in (None, '') or agent in MAIN_NAMES else str(agent)
         with self.lock:
-            doc = {'version': 1, 'mail': self.level() if level is None else level,
-                   'calendar': self.calendar_level() if calendar is None else calendar}
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_name('.agent-access.tmp')
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, 'w') as f:
-                json.dump(doc, f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self.path)
+            doc = self._doc()
+            if doc is None:
+                doc = {'agents': {}}  # the owner's pick replaces a corrupt file; nobody else gains a level
+            rows = self._agents(doc)
+            if level is not None:
+                if ident not in rows and ident != MAIN:
+                    raise AccessRefused(404, 'not_found', 'No such agent.')
+                rows.setdefault(ident, {'label': '', 'last_used': None})['mail'] = level
+            self._write({'version': 1, 'mail': rows.get(MAIN, {}).get('mail', NEW_AGENT),
+                         'calendar': self.calendar_level() if calendar is None else calendar, 'agents': rows})
         return self.view()
 
     def set_from(self, body):
-        """Owner route body: {mail: <level>} and/or {calendar: <level>}."""
+        """Owner route body: {mail: <level>, agent?: <id>} and/or {calendar: <level>}."""
         body = body if isinstance(body, dict) else {}
-        return self.set(body.get('mail'), body.get('calendar'))
+        return self.set(body.get('mail'), body.get('calendar'), body.get('agent'))
+
+    def agents_view(self):
+        doc = self._doc()
+        rows = self._agents(doc) if doc is not None else {}
+        rows.setdefault(MAIN, {'mail': NEW_AGENT, 'label': '', 'last_used': None})
+        out = []
+        for ident, row in rows.items():
+            level = row.get('mail') if row.get('mail') in LEVELS else 'no_access'
+            out.append({'id': ident, 'label': row.get('label') or ('Your Wizard agent' if ident == MAIN else ident),
+                        'level': level, 'level_label': LABELS[level], 'main': ident == MAIN,
+                        'last_used': row.get('last_used') if isinstance(row.get('last_used'), int) else None})
+        return sorted(out, key=lambda r: (not r['main'], r['label'].casefold()))
 
     def view(self):
         level, cal = self.level(), self.calendar_level()
-        return {'mail': level, 'label': LABELS[level], 'what': WHAT[level], 'default': DEFAULT,
+        return {'mail': level, 'label': LABELS[level], 'what': WHAT[level], 'default': DEFAULT, 'per_agent': True,
+                'agents': self.agents_view(),
                 'levels': [{'id': x, 'label': LABELS[x], 'what': WHAT[x], 'recommended': x == DEFAULT} for x in LEVELS],
                 'calendar': cal, 'calendar_label': CAL_LABELS[cal], 'calendar_what': CAL_WHAT[cal], 'calendar_default': CAL_DEFAULT,
                 'calendar_levels': [{'id': x, 'label': CAL_LABELS[x], 'what': CAL_WHAT[x], 'recommended': x == CAL_DEFAULT}
                                     for x in CAL_LEVELS]}
 
-    def agent_view(self):
-        """What an agent is told in its status: its mail level and what it means."""
-        level = self.level()
-        return {'level': level, 'label': LABELS[level], 'what': WHAT[level], 'can_send': False,
+    def agent_view(self, caller='agent:main'):
+        """What an agent is told in its status: its own mail level and what it means."""
+        level = self.level(caller)
+        return {'level': level, 'label': LABELS[level], 'what': WHAT[level], 'can_send': level == 'draft_and_send',
                 'change': 'Only the owner changes this, in Mail > Settings > Agent access.'}
 
     def calendar_agent_view(self):
@@ -173,12 +290,14 @@ class AgentAccess:
             return None
         if tool in MAIL_TOOLS:
             need = MAIL_TOOLS[tool]
-            if need is None:
-                raise AccessRefused(403, 'agent_send_refused', SEND_REFUSED)
-            level = self.level()
+            level = self.level(caller)
             if RANK[level] < RANK[need]:
-                raise AccessRefused(403, 'agent_access_denied', f'Agent access to mail is {LABELS[level]}: {WHAT[level]} '
-                                                                 'The owner changes it in Mail > Settings > Agent access.')
+                if tool == 'mail_send' and level != 'no_access':
+                    raise AccessRefused(403, 'agent_send_refused', SEND_REFUSED.format(name='This agent', label=LABELS[level]))
+                code = 'agent_access_off' if level == 'no_access' else 'agent_access_denied'
+                raise AccessRefused(403, code, f'The owner set this agent to {LABELS[level]} for mail: {WHAT[level]} '
+                                               f'This tool needs {LABELS[need]} or higher. Only the owner can change it, '
+                                               'in Mail > Settings > Agent access.')
             return None
         if tool in ('calendar_suggestion_approve', 'calendar_suggestion_dismiss'):
             raise AccessRefused(403, 'agent_approve_refused', APPROVE_REFUSED)
@@ -193,8 +312,12 @@ class AgentAccess:
         return None
 
     def visible_tools(self, caller, names):
-        """Tools listed to this caller: agents never see mail_send or the owner's approve / dismiss."""
-        return [n for n in names if not (is_agent(caller) and n in OWNER_ONLY)]
+        """Tools listed to this caller: an agent sees only the mail tools its own level allows, and never the owner's
+        approve / dismiss."""
+        if not is_agent(caller):
+            return list(names)
+        level = RANK[self.level(caller)]
+        return [n for n in names if n not in OWNER_ONLY and (n not in MAIL_TOOLS or level >= RANK[MAIL_TOOLS[n]])]
 
     def gog_flags(self, caller, root):
         """Extra gog flags for an agent's gmail or calendar command (the Google app's google_run), so gog itself
@@ -212,12 +335,14 @@ class AgentAccess:
                                              'move', 'delete', 'respond', 'propose-time', 'focus-time', 'out-of-office',
                                              'working-location', 'acl')]
             return ['--readonly', '--disable-commands=' + ','.join(off)]
-        level = self.level()
+        level = self.level(caller)
         if level == 'no_access':
-            raise AccessRefused(403, 'agent_access_denied', f'Agent access to mail is No access: {WHAT["no_access"]}')
-        # Sending, replying, forwarding and auto-replies are refused by gog's own agent-safety switch; settings
-        # (forwarding, filters, vacation replies) and open tracking could send mail indirectly, so they are off too.
+            raise AccessRefused(403, 'agent_access_off', f'The owner set this agent to No access for mail: {WHAT["no_access"]}')
+        # Settings (forwarding, filters, vacation replies) and open tracking could send mail indirectly: always off.
         off = ['gmail.settings', 'gmail.track', 'gmail.autoreply', 'gmail.batch.delete']
+        if level == 'draft_and_send':
+            return ['--disable-commands=' + ','.join(off)]
+        # Below Draft-and-send, sending, replying and forwarding are refused by gog's own agent-safety switch.
         flags = ['--gmail-no-send']
         if level == 'read_only':
             flags.insert(0, '--readonly')  # gog blocks mutating requests at runtime; the list below names them as well
@@ -358,3 +483,111 @@ class AppGrants:
             if APP_ID.fullmatch(name) and SHA256_HEX.fullmatch(want) and hmac.compare_digest(want, digest):
                 found = name
         return found
+
+
+class GatewayGrant:
+    """The Agent Service gateway's grant (wizard-messenger `wizard_agents.py` GatewayGrant, same file rules): the
+    `from: host:agent-service` rows of this app's grants file (only key hashes, never keys), re-read when it changes.
+
+    `state()` is 'missing' (no grants file), 'none' (a good file without the gateway's row: an App Manager that does not
+    write it yet), 'rows' or 'bad' (unreadable, oversized, not a regular file or malformed). 'rows' and 'bad' mean the
+    gateway is the only way in for agents; a bad file therefore fails closed instead of reopening bare calls.
+    """
+
+    def __init__(self, path=None, clock=time.time_ns):
+        self.path = Path(path) if path else None
+        self.stamp = None
+        self.cached = ('missing', ())
+        self.lock = threading.Lock()
+        self.clock = clock
+
+    def _read(self):
+        try:
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            return None, ('missing', ())
+        try:
+            st = os.fstat(fd)
+            stamp = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino)  # ctime: utime cannot fake it
+            if stamp == self.stamp:
+                return stamp, self.cached
+            if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_GRANTS_FILE:
+                return stamp, ('bad', ())
+            data = b''
+            while len(data) <= MAX_GRANTS_FILE:
+                chunk = os.read(fd, MAX_GRANTS_FILE + 1 - len(data))
+                if not chunk:
+                    break
+                data += chunk
+            if len(data) > MAX_GRANTS_FILE:
+                return stamp, ('bad', ())
+        finally:
+            os.close(fd)
+        try:
+            doc = json.loads(data)
+        except ValueError:
+            return stamp, ('bad', ())
+        rows = doc.get('incoming') if isinstance(doc, dict) else None
+        if not isinstance(rows, list):
+            return stamp, ('bad', ())
+        hashes = tuple(row['sha256'] for row in rows if isinstance(row, dict) and row.get('from') == GATEWAY
+                       and isinstance(row.get('sha256'), str) and SHA256_HEX.fullmatch(row['sha256']))
+        return stamp, ('rows' if hashes else 'none', hashes)
+
+    def current(self):
+        if not self.path:
+            return ('missing', ())
+        with self.lock:
+            try:
+                stamp, value = self._read()
+            except Exception:  # noqa: BLE001  unreadable or pathological: fail closed
+                self.stamp, self.cached = None, ('bad', ())
+                return self.cached
+            # A stamp younger than 2 s is not trusted: an in-place rewrite within one mtime tick keeps inode and size.
+            self.stamp = stamp if stamp and self.clock() - max(stamp[0], stamp[1]) > 2_000_000_000 else None
+            self.cached = value
+            return value
+
+    def state(self):
+        return self.current()[0]
+
+    def matches(self, grant):
+        if not isinstance(grant, str) or not KEY_RE.fullmatch(grant):
+            return False
+        hashes = self.current()[1]
+        if not hashes:
+            return False
+        digest = hashlib.sha256(grant.encode()).hexdigest().encode()
+        return any(hmac.compare_digest(digest, h.encode()) for h in hashes)
+
+
+def resolve_caller(headers, apps, gateway, access=None):
+    """Who an MCP or /v1 request (already box-local, not a browser, not forwarded) speaks for: 'app:<id>' for a front
+    end's own owner tap, 'agent:<id>' for an agent. `headers.get` reads the request headers. Raises AccessRefused.
+
+    The agent name is believed only behind a grant: the gateway's (it authenticates each agent with its own token), or
+    a front end's (Mail / Calendar relaying an agent they verified through the gateway). A self-declared name never is.
+    """
+    grant = headers.get('X-Wizard-Grant') or ''
+    named = (headers.get('X-Wizard-Agent') or '').strip().lower()
+    label = headers.get('X-Wizard-Agent-Label')
+    if named and not AGENT_ID.fullmatch(named):
+        raise AccessRefused(400, 'invalid_agent', 'Invalid agent name.')
+    if grant:
+        app = apps.caller(grant)
+        if app:
+            if not named:
+                return 'app:' + app
+            caller = 'agent:' + (MAIN if named in MAIN_NAMES else named)
+        elif gateway.matches(grant):
+            caller = 'agent:' + (MAIN if not named or named in MAIN_NAMES else named)
+        else:
+            raise AccessRefused(401, 'grant_unknown', 'This grant is not known here.')
+        if access is not None:
+            access.seen(caller, label)
+        return caller
+    if gateway.state() in ('rows', 'bad'):
+        raise AccessRefused(401, 'gateway_grant_required', 'Agents reach this app through the Wizard gateway '
+                                                           '(mcp__wizard__...), not directly.')
+    # A box whose App Manager does not write the gateway's row yet: a bare call is the main agent, whatever it says.
+    return 'agent:' + MAIN

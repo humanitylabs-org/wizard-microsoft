@@ -27,7 +27,7 @@ from pathlib import Path
 
 import composio
 import graph
-from agent_access import AgentAccess, AccessRefused, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call
+from agent_access import AgentAccess, AccessRefused, is_agent, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call
 
 LOGIN = 'https://login.microsoftonline.com'
 SCOPES = ['offline_access', 'openid', 'email', 'profile', 'User.Read', 'Mail.ReadWrite', 'Mail.Send', 'Calendars.ReadWrite']
@@ -165,10 +165,13 @@ class Service:
     def __init__(self, data_dir, *, http=None, composio_transport=None, clock=time.time):
         self.store = Store(data_dir)
         self.state = self.store.load()
-        # The owner's choice of what agents may do with mail (Mail > Settings > Agent access). Draft only by default.
+        # The owner's choice of what each agent may do with mail (Mail > Settings > Agent access).
         self.access = AgentAccess(data_dir)
         # Calendar changes agents suggested at Suggest only, waiting for the owner's Approve / Dismiss in Calendar.
         self.suggestions = Suggestions(data_dir)
+        # Per-agent mail levels: an update keeps the level every agent had for the main agent; a fresh install starts
+        # every agent, the main one included, at No access until the owner picks.
+        self.access.migrate(bool(self.state.get('accounts')))
         self.http = http or Http()
         self.composio_transport = composio_transport
         self.clock = clock
@@ -735,14 +738,16 @@ class Service:
                 'suggested': True, 'applied': False, 'suggestion': item,
                 'next': 'Nothing changed yet. The owner sees this in Calendar and approves or dismisses it.'}
 
-    def status(self):
-        """For agents and scripts. Never a key or token."""
+    def status(self, caller='agent:main'):
+        """For agents and scripts: this agent's own mail level. Never a key or token. `per_agent_callers`: Mail and
+        Calendar may relay a gateway-verified agent with their grant plus X-Wizard-Agent (agent_access.resolve_caller)."""
         accounts = list(self.state['accounts'].values())
-        return {'connected': any(a['status'] == 'active' for a in accounts), 'mail_access': self.access.agent_view(),
-                'calendar_access': self.access.calendar_agent_view(),
+        caller = caller if is_agent(caller) else 'agent:main'
+        return {'connected': any(a['status'] == 'active' for a in accounts), 'mail_access': self.access.agent_view(caller),
+                'calendar_access': self.access.calendar_agent_view(), 'per_agent_callers': True,
                 'accounts': [{'email': a['email'], 'label': a.get('label', ''), 'status': a['status'],
                               'via': 'composio' if a['via'] == 'composio' else 'own-app', 'services': a['services']} for a in accounts],
-                'contract': graph.CONTRACT, 'tools': self.access.visible_tools('agent:main', sorted(graph.TOOLS) + ['calendar_suggestions']), 'app_link': '/wizard-os-home/?open=wizard-microsoft'}
+                'contract': graph.CONTRACT, 'tools': self.access.visible_tools(caller, sorted(graph.TOOLS) + ['calendar_suggestions']), 'app_link': '/wizard-os-home/?open=wizard-microsoft'}
 
     def connection(self):
         accounts = list(self.state['accounts'].values())
