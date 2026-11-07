@@ -17,6 +17,9 @@ The Microsoft app holds the owner's Outlook sign-ins (several accounts, e.g. wor
 | Read one message | `mail_get` `{"id": "<id from mail_search>"}` |
 | Draft a reply | `mail_draft` `{"reply_to_id": "<id>", "body": "…"}` |
 | Draft new mail | `mail_draft` `{"to": ["a@b.com"], "subject": "…", "body": "…"}` |
+| Attach files | `mail_draft` `… "attachments": [{"name": "plan.pdf", "mime": "application/pdf", "base64": "…"}]` (10 files, 3 MB each) |
+| Change a draft in place | `mail_draft` `{"draft_id": "<draft_id from mail_get>", …changed fields}`: its files stay unless named in `remove_attachments` |
+| Forward with files | `mail_draft` `{"to": [...], "subject": "Fwd: …", "body": "…", "attachments_from": "<message id>"}` |
 | Send | You can't: `mail_send` refuses agents. Tell the owner the draft waits in Mail (Drafts); he sends it there. |
 | This week's events | `calendar_list_events` `{"time_min": "2026-11-02T00:00:00+07:00", "time_max": "2026-11-09T00:00:00+07:00"}` |
 | Add an event (after OK) | `calendar_create_event` `{"title": "…", "start": "2026-11-04T10:00:00+07:00", "end": "2026-11-04T10:30:00+07:00"}` |
