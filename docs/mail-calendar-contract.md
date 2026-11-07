@@ -18,9 +18,9 @@ whichever way an account is connected: Google with the owner's own client, Googl
 | Tool | Arguments | Result |
 |---|---|---|
 | `mail_search` | `account?`, `query?`, `folder?`, `unread_only?`, `max?` (1–25), `page_token?` | `folder`, `messages[]` (summary), `next_page_token`, `untrusted` |
-| `mail_get` | `account?`, `id`, `format?` (`text` \| `html`) | `message` (summary + `body_text`, `truncated`, `attachments[]`, `message_id_header`; `body_html` with `format: html`), `untrusted` |
+| `mail_get` | `account?`, `id`, `format?` (`text` \| `html`) | `message` (summary + `body_text`, `truncated`, `attachments[]` {`name`, `mime`, `size`}, `message_id_header`, `draft_id` on a draft; `body_html` with `format: html`), `untrusted` |
 | `mail_update` | `account?`, `id`, any of `read`, `archived`, `trashed` (booleans) | `updated`, `id` (Microsoft moves give a new id), `unread`, `archived`, `trashed` |
-| `mail_draft` | `account?`, `body`, `to[]`, `cc[]`, `bcc[]`, `subject`, `reply_to_id?` | `draft` {`id`, `message_id`, `thread_id`, `to`, `cc`, `subject`, `body_text`}, `sent: false` |
+| `mail_draft` | `account?`, `body?`, `to[]`, `cc[]`, `bcc[]`, `subject`, `reply_to_id?`, `attachments[]?` {`name`, `mime?`, `base64`}, `draft_id?`, `remove_attachments[]?`, `attachments_from?` | `draft` {`id`, `message_id`, `thread_id`, `to`, `cc`, `subject`, `body_text`, `attachments[]` {`name`, `mime`, `size`}}, `updated`, `sent: false` |
 | `mail_send` | `account?`, `draft_id` | `sent: true`, `id`, `thread_id` |
 | `calendar_list_events` | `account?`, `calendar_id?`, `time_min?`, `time_max?`, `query?`, `max?`, `page_token?` | `events[]`, `next_page_token`, `untrusted` |
 | `calendar_create_event` | `account?`, `calendar_id?`, `title`, `start`, `end`, `time_zone?`, `location?`, `description?`, `attendees[]` | `created`, `event` |
@@ -33,6 +33,18 @@ HTML exactly as sent: untrusted, never shown without sanitizing (Wizard Mail str
 renders it in a sandboxed frame). `mail_update` never deletes for good; trash is reversible.
 
 Additions in 1.1 (`mail_update`, `folder`, `format`) are backward compatible; the contract id stays `wizard.mail-calendar/1`.
+
+Additions in 1.2 (draft attachments, backward compatible):
+- `attachments`: new files, `[{name, mime?, base64}]` (plain or URL-safe base64; `mime` is guessed from the name when
+  left out). At most 10 files and 18 MB of files per call; a name is one plain file name (no `/`, `\`, control
+  characters, `.` or `..`; at most 200 characters). A refused file is a 400 `invalid_arguments` with a plain message.
+- `draft_id`: change that draft in place (Gmail `drafts.update`; Outlook PATCH on the draft). Its attachments stay
+  unless named in `remove_attachments`; `to`, `cc`, `bcc`, `subject` and `body` left out keep their old value. The id
+  stays the same (Gmail gives the draft a new message id). `mail_get` returns `draft_id` for a message in Drafts.
+- `attachments_from`: a message id whose attachments are copied into the draft (Forward), minus `remove_attachments`.
+- The whole draft (kept + copied + new files) stays under 18 MB. Microsoft: each new file at most 3 MB (Graph's
+  simple attachment upload).
+- Agents keep their level: Draft only may attach and edit drafts; sending stays the owner's.
 
 Message summary: `id`, `thread_id`, `from` {name, email}, `to[]`, `cc[]`, `subject`, `date` (ISO 8601), `snippet`,
 `unread`, `labels[]`.

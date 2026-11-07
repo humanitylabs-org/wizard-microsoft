@@ -39,6 +39,7 @@ import urllib.request
 
 API = 'https://backend.composio.dev/api/v3.1'
 API_HOST = 'backend.composio.dev'
+MAX_ANSWER = 40_000_000  # a proxied Gmail attachment download (base64) can be ~34 MB
 # One place for the sign-up link, so a referral link can be dropped in later.
 SIGNUP_URL = os.environ.get('COMPOSIO_SIGNUP_URL') or 'https://dashboard.composio.dev/login'
 KEY_HELP = 'In Composio, open Settings, then Project settings, and copy the key under API keys.'
@@ -106,14 +107,15 @@ class HttpTransport:
             headers['Content-Type'] = 'application/json'
         request = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with self.opener.open(request, timeout=self.timeout) as response:
-                status, raw = response.status, response.read(8_000_001)
+            slow = data is not None and (len(data) > 1_000_000 or b'/attachments/' in data[:4000])
+            with self.opener.open(request, timeout=max(self.timeout, 120) if slow else self.timeout) as response:
+                status, raw = response.status, response.read(MAX_ANSWER + 1)
         except urllib.error.HTTPError as error:
             status, raw = error.code, error.read(65536)
             error.close()
         except (urllib.error.URLError, TimeoutError, OSError):
             raise ComposioError('unavailable', 'Could not reach Composio.', 502) from None
-        if len(raw) > 8_000_000:
+        if len(raw) > MAX_ANSWER:
             raise ComposioError('unavailable', 'Composio returned too much data.', 502)
         try:
             payload = json.loads(raw) if raw else {}
@@ -161,14 +163,19 @@ class Client:
                 'toolkit': str(toolkit.get('slug') or '').lower(), 'reason': value.get('status_reason'),
                 'scopes': [s for s in value.get('requested_scopes') or [] if isinstance(s, str)][:40]}
 
-    def remove(self, account_id):
-        """Revoke at the provider (best effort), then delete the connection at Composio."""
+    def remove(self, account_id, revoke=True):
+        """Revoke at the provider (best effort), then delete the connection at Composio.
+
+        revoke=False when another connection of the same provider account stays: a provider revoke ends
+        every token of that sign-in grant, including the one being kept."""
         quoted = urllib.parse.quote(account_id, safe='')
-        revoked = True
-        try:
-            self._call('POST', f'/connected_accounts/{quoted}/revoke', {})
-        except ComposioError:
-            revoked = False
+        revoked = False
+        if revoke:
+            try:
+                self._call('POST', f'/connected_accounts/{quoted}/revoke', {})
+                revoked = True
+            except ComposioError:
+                revoked = False
         try:
             self._call('DELETE', f'/connected_accounts/{quoted}')
         except ComposioError as error:

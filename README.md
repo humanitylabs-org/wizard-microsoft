@@ -13,7 +13,9 @@ Calendar on per account, and give the agent and other apps one set of mail/calen
 | Calls go | box → Composio proxy → Microsoft Graph | box → Microsoft Graph |
 
 Both paths expose the same tools (contract `wizard.mail-calendar/1`, see `docs/mail-calendar-contract.md`), shared with
-the Google app, so the Mail and Calendar front ends work with any source.
+the Google app, so the Mail and Calendar front ends work with any source. `mail_draft` takes attachments (Graph
+fileAttachment, 3 MB per file), changes a draft in place with `draft_id` (files kept unless in `remove_attachments`) and
+forwards files with `attachments_from` (createForward) (contract 1.2, 0.3.0).
 
 ## Layout
 

@@ -65,7 +65,7 @@
   function go(next) { stack.push(next); sheetClose(); say(''); render(); view.scrollTop = 0; }
   function back() { if (!stack.length) return false; stack.pop(); render(); return true; }
   if (window.WizardApp?.version === 1) {
-    WizardApp.ready({ name: 'wizard-microsoft', version: '0.2.6' });
+    WizardApp.ready({ name: 'wizard-microsoft', version: '0.3.0' });
     WizardApp.back.register({ canGoBack: () => stack.length > 0, back });
   }
 

@@ -22,7 +22,7 @@ from agent_access import AppGrants, SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # no
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
-VERSION = '0.2.6'
+VERSION = '0.3.0'
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -34,6 +34,7 @@ def out_origin(trusted, host, own):
 FORWARDING = ('X-Forwarded-For', 'X-Forwarded-Host', 'Forwarded', 'X-Real-IP')
 SESSION_TTL = 8 * 3600
 MAX_BODY = 128_000
+MAX_MAIL_BODY = 26_000_000  # mail_draft with attachments (base64 + JSON)
 
 
 def csv(value):
@@ -309,14 +310,16 @@ def handler_for(app):
                 raise Problem(400, 'invalid_agent', 'Invalid agent name.')
             return 'agent:' + agent
 
-        def body(self):
+        def body(self, limit=MAX_BODY):
             if (self.headers.get('Content-Type') or '').split(';')[0].strip().lower() != 'application/json':
                 raise Problem(415, 'content_type', 'Use application/json.')
             try:
                 length = int(self.headers.get('Content-Length', ''))
             except ValueError:
                 raise Problem(400, 'invalid_length', 'Invalid Content-Length.') from None
-            if not 1 <= length <= MAX_BODY:
+            if length > limit and limit == MAX_MAIL_BODY:
+                raise Problem(413, 'body_size', 'Too big: attachments can be at most 18 MB together.')
+            if not 1 <= length <= limit:
                 raise Problem(413, 'body_size', 'Request body is empty or too large.')
             try:
                 value = json.loads(self.rfile.read(length))
@@ -424,7 +427,7 @@ def handler_for(app):
                 if path == '/mcp':
                     caller = self.box_caller()
                     self.host()
-                    output = rpc(app, self.body(), caller)
+                    output = rpc(app, self.body(MAX_MAIL_BODY), caller)
                     return self.send_json(202 if output is None else 200, output or {})
                 local = re.fullmatch(r'/v1/([a-z_]{3,40})', path)
                 if local:
@@ -432,7 +435,8 @@ def handler_for(app):
                     self.host()
                     if local.group(1) not in graph.TOOLS and local.group(1) not in SUGGESTION_TOOLS:
                         raise Problem(404, 'not_found', 'Not found.')
-                    return self.send_json(200, app.service.call_tool(caller, local.group(1), self.body()))
+                    limit = MAX_MAIL_BODY if local.group(1) == 'mail_draft' else MAX_BODY
+                    return self.send_json(200, app.service.call_tool(caller, local.group(1), self.body(limit)))
                 host = self.owner()
                 origin = self.same_origin_write(host)
                 if path == '/api/session':
