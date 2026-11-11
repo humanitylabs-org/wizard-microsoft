@@ -401,7 +401,8 @@ def _event(e, calendar):
             'status': 'cancelled' if e.get('isCancelled') else 'confirmed', 'link': e.get('webLink'),
             'recurring': e.get('type') in ('occurrence', 'exception', 'seriesMaster'),
             'online_meeting': ((e.get('onlineMeeting') or {}).get('joinUrl')),
-            'by_agent': _by(e) == 'agent'}
+            'by_agent': _by(e) == 'agent',
+            'series_id': e.get('seriesMasterId') or (e.get('id') if e.get('type') == 'seriesMaster' else None)}
 
 
 def _by(e):
@@ -500,9 +501,87 @@ def calendar_create_event(call, args, by=None):
     return {'created': True, 'event': _event(_stamped(created, by), calendar)}
 
 
+# Moving a whole series (contract 1.5): `scope: series` with `shift_start_minutes` / `shift_end_minutes` moves the series
+# master's start and end by that many minutes of wall time in the series' own time zone, so every repeat moves the same
+# amount. Same day only: the recurrence pattern (e.g. every Monday) is not rewritten, so a shift that changes the series'
+# start date is refused. Occurrences changed one by one (exceptions) keep their own times.
+MAX_SHIFT = 1439
+ZONE_NAME = r'[A-Za-z0-9 _+\-/().,:]{1,100}'
+
+
+def _shift_arg(args, name):
+    value = args.get(name, 0)
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, int) or abs(value) > MAX_SHIFT:
+        raise BadArgs(f'{name} must be a whole number of minutes between -{MAX_SHIFT} and {MAX_SHIFT}.')
+    return value
+
+
+def _series_zone(value):
+    """The series' own zone for the Prefer header and the PATCH (Windows or IANA name)."""
+    value = str(value or 'UTC')
+    if value.lower() == 'tzone://microsoft/utc':
+        return 'UTC'
+    if value.startswith('tzone://') or not re.fullmatch(ZONE_NAME, value):
+        raise BadArgs('This repeating event uses a custom time zone; change the series in Outlook.')
+    return value
+
+
+def _wall(when):
+    stamp = str((when or {}).get('dateTime') or '')
+    if not re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', stamp):
+        raise BadArgs('This repeating event has no start time to move.')
+    return datetime.datetime.fromisoformat(stamp[:19])
+
+
+def _update_series(call, calendar, event, args, by):
+    start_by, end_by = _shift_arg(args, 'shift_start_minutes'), _shift_arg(args, 'shift_end_minutes')
+    if not start_by and not end_by:
+        raise BadArgs('Nothing to change: give shift_start_minutes and/or shift_end_minutes.')
+    if any(args.get(name) is not None for name in ('start', 'end')):
+        raise BadArgs('With scope series, move the series with shift_start_minutes / shift_end_minutes, not start / end.')
+    extra = _event_body({k: v for k, v in args.items() if k not in ('start', 'end', 'time_zone')}, False) \
+        if any(args.get(k) is not None for k in ('title', 'description', 'location', 'attendees')) else {}
+    item = call('GET', f'{GRAPH}/me/events/{event}', {'$select': 'id,type,seriesMasterId'}, None, UTC)
+    master_id = item.get('seriesMasterId') or (item.get('id') if item.get('type') == 'seriesMaster' else None)
+    if not master_id:
+        raise BadArgs('This event does not repeat; change it without scope series.')
+    master_path = f'{GRAPH}/me/events/{ident({"i": master_id}, "i")}'
+    zones = call('GET', master_path, {'$select': 'id,type,isAllDay,originalStartTimeZone,originalEndTimeZone'}, None, UTC)
+    if zones.get('isAllDay'):
+        raise BadArgs('All-day series move in Outlook.')
+    start_zone = _series_zone(zones.get('originalStartTimeZone'))
+    end_zone = _series_zone(zones.get('originalEndTimeZone') or start_zone)
+    # Read the series' times in its own zone, so the shift is wall time there (10:00 every Monday stays 10:00 local
+    # across a daylight-saving change).
+    current = call('GET', master_path, {'$select': 'id,start,end'}, None, {'Prefer': f'outlook.timezone="{start_zone}"'})
+    start = _wall(current.get('start'))
+    end = _wall(current.get('end'))
+    if end_zone != start_zone:
+        current_end = call('GET', master_path, {'$select': 'id,end'}, None, {'Prefer': f'outlook.timezone="{end_zone}"'})
+        end = _wall(current_end.get('end'))
+    new_start, new_end = start + datetime.timedelta(minutes=start_by), end + datetime.timedelta(minutes=end_by)
+    if new_start.date() != start.date():
+        raise BadArgs('Moving every repeat to another day is not possible here (the repeat pattern stays); change the series in Outlook.')
+    if end_zone == start_zone and new_end <= new_start:
+        raise BadArgs('The series would end before it starts.')
+    body = {**extra, 'start': {'dateTime': new_start.strftime('%Y-%m-%dT%H:%M:%S'), 'timeZone': start_zone},
+            'end': {'dateTime': new_end.strftime('%Y-%m-%dT%H:%M:%S'), 'timeZone': end_zone}}
+    updated = call('PATCH', master_path, None, _mark(body, by), UTC)
+    return {'updated': True, 'scope': 'series', 'series_id': master_id, 'event': _event(_stamped(updated, by), calendar)}
+
+
 def calendar_update_event(call, args, by=None):
     _, calendar = _base(args)
     event = ident(args, 'id')
+    scope = args.get('scope') or 'occurrence'
+    if scope not in ('occurrence', 'series'):
+        raise BadArgs('scope must be occurrence (default) or series.')
+    if scope == 'series':
+        return _update_series(call, calendar, event, args, by)
+    if any(args.get(name) is not None for name in ('shift_start_minutes', 'shift_end_minutes')):
+        raise BadArgs('shift_start_minutes / shift_end_minutes need scope series.')
     updated = call('PATCH', f'{GRAPH}/me/events/{event}', None, _mark(_event_body(args, False), by), UTC)
     return {'updated': True, 'event': _event(_stamped(updated, by), calendar)}
 
@@ -601,7 +680,14 @@ SCHEMAS = [
                     location={'type': 'string'}, description={'type': 'string'}, attendees=_ADDR)),
     ('calendar_update_event', 'Change an event (only the fields you pass; guests are told). At the owner\'s default (Suggest only) this only saves a suggestion the owner approves in Calendar.',
      False, _schema(['id'], account=_ACCOUNT, calendar_id=_CAL, id={'type': 'string'}, title={'type': 'string'}, start=_TIME, end=_TIME,
-                    time_zone={'type': 'string'}, location={'type': 'string'}, description={'type': 'string'}, attendees=_ADDR)),
+                    time_zone={'type': 'string'}, location={'type': 'string'}, description={'type': 'string'}, attendees=_ADDR,
+                    scope={'type': 'string', 'enum': ['occurrence', 'series'],
+                           'description': 'series: change every repeat of a repeating event (id may be one repeat or its series_id). '
+                                          'Move it with shift_start_minutes / shift_end_minutes instead of start / end.'},
+                    shift_start_minutes={'type': 'integer', 'minimum': -MAX_SHIFT, 'maximum': MAX_SHIFT,
+                                         'description': 'With scope series: move every repeat\'s start by this many minutes (same day only).'},
+                    shift_end_minutes={'type': 'integer', 'minimum': -MAX_SHIFT, 'maximum': MAX_SHIFT,
+                                       'description': 'With scope series: move every repeat\'s end by this many minutes.'})),
     ('calendar_delete_event', 'Delete an event (guests are told). At the owner\'s default (Suggest only) this only saves a suggestion the owner approves in Calendar.',
      False, _schema(['id'], account=_ACCOUNT, calendar_id=_CAL, id={'type': 'string'})),
     ('calendar_respond', 'Answer an invitation: accepted, declined or tentative. At the owner\'s default (Suggest only) this only saves a suggestion the owner approves in Calendar.',
