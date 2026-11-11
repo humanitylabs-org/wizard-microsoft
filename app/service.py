@@ -27,7 +27,7 @@ from pathlib import Path
 
 import composio
 import graph
-from agent_access import AgentAccess, AccessRefused, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call
+from agent_access import AgentAccess, AccessRefused, Suggestions, SUGGESTION_TOOLS, DryRun, dry_call, is_agent
 
 LOGIN = 'https://login.microsoftonline.com'
 SCOPES = ['offline_access', 'openid', 'email', 'profile', 'User.Read', 'Mail.ReadWrite', 'Mail.Send', 'Calendars.ReadWrite']
@@ -627,9 +627,13 @@ class Service:
                           app_link='/wizard-os-home/?open=wizard-microsoft')
         raise Problem(400, 'account_required', 'Several accounts can do this; name one with "account".', accounts=[a['email'] for a in candidates])
 
-    def call_tool(self, caller, tool, args):
-        """One mail/calendar tool on one account. Mail and event text in the result is untrusted data."""
+    def call_tool(self, caller, tool, args, by=None):
+        """One mail/calendar tool on one account. Mail and event text in the result is untrusted data.
+        Calendar creates and changes are stamped with who made them (`by_agent`): an agent, or the owner's own tap from
+        a front end; `by='agent'` is the owner approving an agent's suggestion."""
         args = args if isinstance(args, dict) else {}
+        if by not in ('agent', 'owner'):
+            by = 'agent' if is_agent(caller) else 'owner'
         if tool in SUGGESTION_TOOLS:
             return self._suggestion_tool(caller, tool, args)
         if tool not in graph.TOOLS:
@@ -645,7 +649,7 @@ class Service:
             return self._suggest(caller, tool, args, handler, a)
         call = self._quick_call_for(a['composio'], a['id']) if a['via'] == 'composio' else self._own_call(a['id'])
         try:
-            result = handler(call, args)
+            result = handler(call, args, by=by) if tool in graph.STAMPED else handler(call, args)
         except graph.BadArgs as bad:
             raise Problem(400, 'invalid_arguments', str(bad)) from None
         except graph.GraphError as failure:
@@ -713,7 +717,7 @@ class Service:
             self._audit(caller, '-', tool, 'ok')
             return {'dismissed': True, 'id': item['id']}
         # Approve: the owner's change, applied as the owner (the caller is the front end's grant, so no new suggestion).
-        result = self.call_tool(caller, item['tool'], item['args'])
+        result = self.call_tool(caller, item['tool'], item['args'], by='agent')  # still the agent's change
         self.suggestions.drop(item['id'])
         self._audit(caller, '-', tool, 'ok')
         return {'approved': True, 'id': item['id'], 'result': result}

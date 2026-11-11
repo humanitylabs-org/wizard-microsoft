@@ -52,7 +52,8 @@ Message summary: `id`, `thread_id`, `from` {name, email}, `to[]`, `cc[]`, `subje
 Event: `id`, `calendar_id`, `title`, `start`/`end` (`{date}` for all-day, else `{date_time, time_zone}`), `all_day`,
 `location`, `description`, `attendees[]` {email, name, response, self, organizer}, `organizer`, `is_organizer`,
 `my_response` (`none` | `accepted` | `declined` | `tentative` | `organizer`), `status`, `link`, `recurring`,
-`online_meeting`.
+`online_meeting`, `by_agent` (true when an agent added or last changed the event through this source, also via an
+approved suggestion; absent or false otherwise, and an owner edit from a front end clears it).
 
 Times in: a date (`2026-11-04`) for all-day, an RFC 3339 time with offset, or a local time plus `time_zone` (IANA).
 
