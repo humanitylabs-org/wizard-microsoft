@@ -4,7 +4,7 @@ id: wizard-microsoft
 name: Microsoft
 type: external
 category: system
-version: 0.3.0
+version: 0.3.1
 summary: Connect Outlook mail and calendar. Quick connect through Composio, or your own Microsoft app; several accounts.
 tags: [communication, productivity]
 license: GPL-3.0-only
@@ -34,6 +34,9 @@ system: true
 uses: []
 needs: []
 health: /healthz
+switches:
+  contract: wizard.app-switches/1
+  path: /api/switches
 ---
 
 # Microsoft
