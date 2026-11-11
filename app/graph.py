@@ -33,6 +33,10 @@ MAX_FILES = 10
 MAX_FILE_BYTES = 3 * 1024 * 1024
 MAX_NEW_BYTES = 18 * 1024 * 1024
 MIME = re.compile(r'[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,127}')
+# Who last added or changed an event through this app (wizard-microsoft#5): a private single-value extended property in
+# Wizard's own namespace, "agent" or "owner". calendar_list_events maps it to `by_agent`.
+BY_PROP = 'String {7d3c5b1e-4a2f-4e8b-9c61-0b5d2e7f8a34} Name wizardBy'
+BY_EXPAND = {'$expand': f"singleValueExtendedProperties($filter=id eq '{BY_PROP}')"}
 MSG_FIELDS = 'id,conversationId,from,toRecipients,ccRecipients,subject,receivedDateTime,bodyPreview,isRead,categories,hasAttachments,isDraft'
 
 
@@ -396,7 +400,29 @@ def _event(e, calendar):
             'my_response': _resp((e.get('responseStatus') or {}).get('response')),
             'status': 'cancelled' if e.get('isCancelled') else 'confirmed', 'link': e.get('webLink'),
             'recurring': e.get('type') in ('occurrence', 'exception', 'seriesMaster'),
-            'online_meeting': ((e.get('onlineMeeting') or {}).get('joinUrl'))}
+            'online_meeting': ((e.get('onlineMeeting') or {}).get('joinUrl')),
+            'by_agent': _by(e) == 'agent'}
+
+
+def _by(e):
+    for prop in e.get('singleValueExtendedProperties') or []:
+        if isinstance(prop, dict) and str(prop.get('id') or '').lower() == BY_PROP.lower():
+            return prop.get('value')
+    return None
+
+
+def _mark(body, by):
+    """Stamp who made this change ("agent" or "owner") on the event body; an owner edit clears the agent mark."""
+    if by in ('agent', 'owner'):
+        body['singleValueExtendedProperties'] = [{'id': BY_PROP, 'value': by}]
+    return body
+
+
+def _stamped(e, by):
+    """Graph's create/update answer leaves extended properties out unless expanded; we know what we just wrote."""
+    if by in ('agent', 'owner') and isinstance(e, dict):
+        return {**e, 'singleValueExtendedProperties': [{'id': BY_PROP, 'value': by}]}
+    return e
 
 
 def _base(args):
@@ -457,7 +483,8 @@ def calendar_list_events(call, args):
     start = _zoned(args['time_min'], 'time_min') if args.get('time_min') else now.strftime('%Y-%m-%dT%H:%M:%S')
     end = _zoned(args['time_max'], 'time_max') if args.get('time_max') else (now + datetime.timedelta(days=30)).strftime('%Y-%m-%dT%H:%M:%S')
     limit = number(args, 'max', 25, 1, 250)
-    params = _page(args) or {'startDateTime': start + 'Z', 'endDateTime': end + 'Z', '$top': str(min(limit, 100)), '$orderby': 'start/dateTime'}
+    params = _page(args) or {'startDateTime': start + 'Z', 'endDateTime': end + 'Z', '$top': str(min(limit, 100)), '$orderby': 'start/dateTime',
+                             **BY_EXPAND}
     listing = call('GET', f'{base}/calendarView', params, None, UTC)
     events = [_event(e, calendar) for e in listing.get('value') or [] if isinstance(e, dict)]
     if args.get('query'):
@@ -466,17 +493,18 @@ def calendar_list_events(call, args):
     return {'calendar_id': calendar, 'events': events[:limit], 'next_page_token': _next_token(listing), 'untrusted': UNTRUSTED}
 
 
-def calendar_create_event(call, args):
+def calendar_create_event(call, args, by=None):
+    """`by` is who asked ("agent" or "owner", set by the service, never by the caller's arguments)."""
     base, calendar = _base(args)
-    created = call('POST', f'{base}/events', None, _event_body(args, True), UTC)
-    return {'created': True, 'event': _event(created, calendar)}
+    created = call('POST', f'{base}/events', None, _mark(_event_body(args, True), by), UTC)
+    return {'created': True, 'event': _event(_stamped(created, by), calendar)}
 
 
-def calendar_update_event(call, args):
+def calendar_update_event(call, args, by=None):
     _, calendar = _base(args)
     event = ident(args, 'id')
-    updated = call('PATCH', f'{GRAPH}/me/events/{event}', None, _event_body(args, False), UTC)
-    return {'updated': True, 'event': _event(updated, calendar)}
+    updated = call('PATCH', f'{GRAPH}/me/events/{event}', None, _mark(_event_body(args, False), by), UTC)
+    return {'updated': True, 'event': _event(_stamped(updated, by), calendar)}
 
 
 def calendar_delete_event(call, args):
@@ -495,8 +523,12 @@ def calendar_respond(call, args):
     if args.get('comment'):
         body['comment'] = text(args, 'comment', 1000)
     call('POST', f'{GRAPH}/me/events/{event}/{action}', None, body)
-    current = call('GET', f'{GRAPH}/me/events/{event}', None, None, UTC)
+    current = call('GET', f'{GRAPH}/me/events/{event}', dict(BY_EXPAND), None, UTC)
     return {'responded': args['response'], 'event': _event(current, calendar)}
+
+
+# Tools whose handler takes `by` (who made the change).
+STAMPED = ('calendar_create_event', 'calendar_update_event')
 
 
 def profile(call):

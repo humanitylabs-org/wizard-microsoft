@@ -89,13 +89,15 @@ class FakeGraph:
                 return 404, {'error': {'code': 'ErrorItemNotFound', 'message': 'Not found.'}}
             self.sent.append(self.messages.pop(mid))
             return 202, None
+        def shown(e):  # like Graph: extended properties only when $expand asks for them
+            return e if 'singleValueExtendedProperties' in q.get('$expand', '') else {k: v for k, v in e.items() if k != 'singleValueExtendedProperties'}
         if p == '/me/calendarView':
             assert 'startDateTime' in q and 'endDateTime' in q
-            return 200, {'value': list(self.events.values())}
+            return 200, {'value': [shown(e) for e in self.events.values()]}
         if p == '/me/events' and method == 'POST':
             eid = f'EV{len(self.events)}'
             self.events[eid] = {'id': eid, **body, 'responseStatus': {'response': 'organizer'}, 'isOrganizer': True}
-            return 201, self.events[eid]
+            return 201, shown(self.events[eid])
         if p.startswith('/me/events/'):
             eid = urllib.parse.unquote(parts[3])
             if eid not in self.events:
@@ -105,10 +107,10 @@ class FakeGraph:
                 self.events[eid]['responseStatus'] = {'response': answer}
                 return 202, None
             if method == 'GET':
-                return 200, self.events[eid]
+                return 200, shown(self.events[eid])
             if method == 'PATCH':
                 self.events[eid].update(body)
-                return 200, self.events[eid]
+                return 200, shown(self.events[eid])
             if method == 'DELETE':
                 self.events.pop(eid)
                 return 204, None
@@ -459,6 +461,40 @@ class QuickTools(Base):
         with self.assertRaises(service_mod.Problem) as caught:
             self.s.call_tool('agent:main', 'calendar_create_event', {'title': 'x', 'start': '2026-11-10', 'end': '2026-11-10T10:00:00Z'})
         self.assertEqual(caught.exception.code, 'invalid_arguments')
+
+    def test_calendar_events_say_when_an_agent_made_them(self):
+        """wizard-microsoft#5: an agent's create / change (or an approved suggestion) comes back with by_agent; an owner
+        edit from Calendar clears it; events nobody stamped are not by_agent."""
+        g = self.composio.graph
+
+        def by_agent():
+            listed = self.s.call_tool('app:wizard-calendar', 'calendar_list_events', {'time_min': '2026-11-01T00:00:00Z', 'time_max': '2026-12-01T00:00:00Z'})
+            return {e['id']: e['by_agent'] for e in listed['events']}
+
+        self.assertEqual(by_agent(), {'EV0': False})
+        view = [r for r in g.requests if r[1] == '/me/calendarView'][-1]
+        self.assertIn(service_mod.graph.BY_PROP, view[2]['$expand'])
+        self.s.access.set(calendar='can_edit')
+        made = self.s.call_tool('agent:main', 'calendar_create_event', {'title': 'Dentist', 'start': '2026-11-04T10:00:00+07:00', 'end': '2026-11-04T11:00:00+07:00'})
+        self.assertTrue(made['event']['by_agent'])
+        eid = made['event']['id']
+        self.assertEqual(by_agent()[eid], True)
+        owner = self.s.call_tool('app:wizard-calendar', 'calendar_update_event', {'id': eid, 'title': 'Dentist (mine)'})
+        self.assertFalse(owner['event']['by_agent'])
+        self.assertEqual(by_agent()[eid], False)
+        self.assertTrue(self.s.call_tool('agent:main', 'calendar_update_event', {'id': 'EV0', 'title': 'Standup (moved)'})['event']['by_agent'])
+        self.assertEqual(by_agent()['EV0'], True)
+        self.assertEqual(self.s.call_tool('app:wizard-calendar', 'calendar_create_event', {'title': 'Gym', 'start': '2026-11-05', 'end': '2026-11-06'})['event']['by_agent'], False)
+        # Approving an agent's suggestion applies the agent's change: it still says so.
+        self.s.access.set(calendar='suggest_only')
+        sug = self.s.call_tool('agent:main', 'calendar_create_event', {'title': 'Call mum', 'start': '2026-11-07', 'end': '2026-11-08'})
+        done = self.s.call_tool('app:wizard-calendar', 'calendar_suggestion_approve', {'id': sug['suggestion']['id']})
+        self.assertTrue(done['result']['event']['by_agent'])
+        self.assertEqual(by_agent()[done['result']['event']['id']], True)
+        # The caller can't pick the stamp through arguments.
+        self.s.access.set(calendar='can_edit')
+        sneaky = self.s.call_tool('agent:main', 'calendar_create_event', {'title': 'x', 'start': '2026-11-09', 'end': '2026-11-10', 'by': 'owner'})
+        self.assertTrue(sneaky['event']['by_agent'])
 
     def test_calendar_suggestions_wait_for_the_owner(self):
         g = self.composio.graph
