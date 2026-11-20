@@ -19,6 +19,7 @@ whichever way an account is connected: Google with the owner's own client, Googl
 |---|---|---|
 | `mail_search` | `account?`, `query?`, `folder?`, `unread_only?`, `max?` (1–25), `page_token?` | `folder`, `messages[]` (summary), `next_page_token`, `untrusted` |
 | `mail_get` | `account?`, `id`, `format?` (`text` \| `html`) | `message` (summary + `body_text`, `truncated`, `attachments[]` {`name`, `mime`, `size`}, `message_id_header`, `draft_id` on a draft; `body_html` with `format: html`), `untrusted` |
+| `mail_attachment` | `account?`, `id`, `part` (1.6, owner only) | `attachment` {`name`, `mime`, `size`, `base64`} |
 | `mail_update` | `account?`, `id`, any of `read`, `archived`, `trashed` (booleans) | `updated`, `id` (Microsoft moves give a new id), `unread`, `archived`, `trashed` |
 | `mail_draft` | `account?`, `body?`, `to[]`, `cc[]`, `bcc[]`, `subject`, `reply_to_id?`, `attachments[]?` {`name`, `mime?`, `base64`}, `draft_id?`, `remove_attachments[]?`, `attachments_from?` | `draft` {`id`, `message_id`, `thread_id`, `to`, `cc`, `subject`, `body_text`, `attachments[]` {`name`, `mime`, `size`}}, `updated`, `sent: false` |
 | `mail_send` | `account?`, `draft_id` | `sent: true`, `id`, `thread_id` |
@@ -62,6 +63,11 @@ Additions in 1.5 (repeating events as a whole, backward compatible):
   Microsoft: a series in a custom time zone (`tzone://Microsoft/Custom`) and all-day series are refused.
 - A source before 1.5 answers `scope: series` with `invalid_arguments` ("Nothing to change") and changes nothing, so front
   ends offer the whole-series change only for events that carry `series_id`.
+
+Additions in 1.6 (reading attachments, backward compatible; wizard-mail#32):
+- `mail_get`: each `attachments[]` entry also carries `part` (the file's id inside this message, stable across calls: Gmail `partId`, Microsoft the attachment `id`), `content_id` (its Content-ID without `<>`, or `null`) and `inline` (`true` when the sender placed it in the body). New `inline_parts[]` {`part`, `mime`, `size`, `content_id`}: pictures with a Content-ID but no file name (referenced as `cid:` in `body_html`); they are not in `attachments` and are never forwarded. At most 50 of each.
+- `mail_attachment` (`account?`, `id`, `part`) answers `attachment` {`name`, `mime`, `size`, `base64`} (standard base64) with one file's bytes, for Wizard Mail to show a picture or save a file. At most 25 MB (bigger: 413 `attachment_too_big`); an unknown `part` is 404 `not_found`. **Owner only**: an agent is refused with 403 `owner_only` (agents read mail as text), and the tool is not offered on MCP or in an agent's tool list.
+- A source before 1.6 answers `mail_attachment` with 404; Mail then says to update the source app.
 
 Message summary: `id`, `thread_id`, `from` {name, email}, `to[]`, `cc[]`, `subject`, `date` (ISO 8601), `snippet`,
 `unread`, `labels[]`.

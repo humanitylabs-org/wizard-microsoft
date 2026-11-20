@@ -138,6 +138,47 @@
     }
    }
   },
+  "/v1/mail_attachment": {
+   "post": {
+    "summary": "Owner only (Wizard Mail with its grant; agents get 403 owner_only): one attachment's bytes, standard base64, at most 25 MB (413 attachment_too_big). Not on MCP.",
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "id",
+         "part"
+        ],
+        "properties": {
+         "account": {
+          "type": "string",
+          "description": "Email or label (e.g. \"work\") of the account. Optional when only one account has this on."
+         },
+         "id": {
+          "type": "string",
+          "description": "Message id."
+         },
+         "part": {
+          "type": "string",
+          "description": "attachments[].part or inline_parts[].part from mail_get."
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "description": "{attachment:{name,mime,size,base64}}"
+     },
+     "4XX": {
+      "description": "{error:{code,message}}"
+     }
+    }
+   }
+  },
   "/v1/mail_draft": {
    "post": {
     "summary": "Write a draft in the owner's mailbox. Never sends. For a reply pass reply_to_id (To and Subject then default from it). Show the owner the draft afterwards.",

@@ -199,18 +199,79 @@ def mail_get(call, args):
     if (m.get('body') or {}).get('contentType') == 'html':
         body = re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', body, flags=re.S | re.I)
         body = re.sub(r'[ \t]+', ' ', re.sub(r'<[^>]+>', ' ', body))
-    attachments = []
-    if m.get('hasAttachments'):
-        found = call('GET', f'{GRAPH}/me/messages/{mid}/attachments', {'$select': 'name,contentType,size'})
-        attachments = [{'name': str(a.get('name') or '')[:200], 'mime': a.get('contentType'), 'size': a.get('size')}
-                       for a in found.get('value') or [] if isinstance(a, dict)][:50]
+    attachments, inline_parts = [], []
+    if m.get('hasAttachments') or (want_html and 'cid:' in html.lower()):
+        found = call('GET', f'{GRAPH}/me/messages/{mid}/attachments', {'$select': 'id,name,contentType,size,isInline,contentId'})
+        attachments, inline_parts = _parts(found.get('value') or [])
     found = {**_summary(m), 'body_text': body[:MAX_TEXT], 'truncated': len(body) > MAX_TEXT,
-             'message_id_header': m.get('internetMessageId') or '', 'attachments': attachments}
+             'message_id_header': m.get('internetMessageId') or '', 'attachments': attachments, 'inline_parts': inline_parts}
     if m.get('isDraft'):
         found['draft_id'] = m.get('id') or mid  # an Outlook draft is edited by its message id
     if want_html:
         found['body_html'] = html if len(html) <= MAX_HTML else ''
     return {'message': found, 'untrusted': UNTRUSTED}
+
+
+# Reading attachments (contract 1.6). `part` is Graph's attachment id; Mail fetches one file's bytes with mail_attachment.
+MAX_PARTS = 50
+MAX_READ_BYTES = 25 * 1024 * 1024
+PART = r'[A-Za-z0-9=_\-+/.]{1,1024}'
+FILE_TYPE = '#microsoft.graph.fileAttachment'
+
+
+def _cid(value):
+    value = str(value or '').strip()
+    if value.startswith('<') and value.endswith('>'):
+        value = value[1:-1].strip()
+    return value[:300] or None
+
+
+def _parts(values):
+    """Graph attachments -> (attachments[], inline_parts[]). Files with a name are attachments (also forwarded); a
+    picture with a Content-ID and no name is an inline part (shown through cid:, never forwarded)."""
+    files, inline = [], []
+    for a in values:
+        if not isinstance(a, dict):
+            continue
+        name, part, cid = str(a.get('name') or '').strip()[:200], str(a.get('id') or ''), _cid(a.get('contentId'))
+        if not re.fullmatch(PART, part):
+            part = None
+        size = a.get('size') if isinstance(a.get('size'), int) and not isinstance(a.get('size'), bool) else None
+        if name:
+            if len(files) < MAX_PARTS:
+                files.append({'name': name, 'mime': a.get('contentType'), 'size': size, 'part': part,
+                              'content_id': cid, 'inline': bool(a.get('isInline'))})
+        elif cid and part and len(inline) < MAX_PARTS:
+            inline.append({'part': part, 'mime': a.get('contentType'), 'size': size, 'content_id': cid})
+    return files, inline
+
+
+def mail_attachment(call, args):
+    """Owner only (the service refuses agents): one file's bytes, standard base64, at most 25 MB."""
+    mid = ident(args, 'id')
+    part = args.get('part')
+    if not isinstance(part, str) or not re.fullmatch(PART, part):
+        raise BadArgs('part is missing or not valid.')
+    where = f'{GRAPH}/me/messages/{mid}/attachments/{urllib.parse.quote(part, safe="")}'
+    info = call('GET', where, {'$select': 'id,name,contentType,size,isInline,contentId'})
+    if info.get('@odata.type') not in (None, FILE_TYPE):
+        raise GraphError('not_found', 404, 'That part is not a file (an attached message or a link); open it in Outlook.')
+    size = info.get('size') if isinstance(info.get('size'), int) else 0
+    if size > MAX_READ_BYTES:
+        raise GraphError('attachment_too_big', 413, f'That file is bigger than {MAX_READ_BYTES // 1048576} MB; open it in Outlook.')
+    full = call('GET', where)
+    if full.get('@odata.type') not in (None, FILE_TYPE) or not isinstance(full.get('contentBytes'), str):
+        raise GraphError('not_found', 404, 'That part is not a file (an attached message or a link); open it in Outlook.')
+    raw = re.sub(r'\s+', '', full['contentBytes'])
+    try:
+        data = base64.b64decode(raw + '=' * (-len(raw) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        raise GraphError('provider_rejected', 502, 'Microsoft sent a file that could not be read.') from None
+    if len(data) > MAX_READ_BYTES:
+        raise GraphError('attachment_too_big', 413, f'That file is bigger than {MAX_READ_BYTES // 1048576} MB; open it in Outlook.')
+    name = str(full.get('name') or info.get('name') or '').strip()[:200]
+    mime = str(full.get('contentType') or info.get('contentType') or 'application/octet-stream')[:200]
+    return {'attachment': {'name': name, 'mime': mime, 'size': len(data), 'base64': base64.b64encode(data).decode()}}
 
 
 def mail_update(call, args):
@@ -618,6 +679,7 @@ def profile(call):
 
 TOOLS = {
     'mail_search': ('mail', False, mail_search), 'mail_get': ('mail', False, mail_get),
+    'mail_attachment': ('mail', False, mail_attachment),
     'mail_draft': ('mail', True, mail_draft), 'mail_send': ('mail', True, mail_send), 'mail_update': ('mail', True, mail_update),
     'calendar_list_events': ('calendar', False, calendar_list_events), 'calendar_create_event': ('calendar', True, calendar_create_event),
     'calendar_update_event': ('calendar', True, calendar_update_event), 'calendar_delete_event': ('calendar', True, calendar_delete_event),

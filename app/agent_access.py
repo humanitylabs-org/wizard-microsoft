@@ -54,7 +54,9 @@ CAL_READ = ('calendar_list_events',)
 CAL_WRITES = ('calendar_create_event', 'calendar_update_event', 'calendar_delete_event', 'calendar_respond')
 # Pending suggestions: agents (Suggest only and up) may list them; approving and dismissing is the owner's tap.
 SUGGESTION_TOOLS = ('calendar_suggestions', 'calendar_suggestion_approve', 'calendar_suggestion_dismiss')
-OWNER_ONLY = ('mail_send', 'calendar_suggestion_approve', 'calendar_suggestion_dismiss')
+# mail_attachment (contract 1.6): one file's bytes for Wizard Mail to show or save, for the owner only. Agents read mail
+# as text; it is refused to them (`owner_only`), never listed to them and not on MCP.
+OWNER_ONLY = ('mail_send', 'mail_attachment', 'calendar_suggestion_approve', 'calendar_suggestion_dismiss')
 
 APP_ID = re.compile(r'[a-z0-9][a-z0-9-]{1,40}')  # app ids only: a gateway row such as "host:agent-service" never matches
 SHA256_HEX = re.compile(r'[0-9a-f]{64}')
@@ -67,6 +69,7 @@ SUGGESTION_DAYS = 30
 SEND_REFUSED = ('Agents can\'t send mail on this Wizard (Mail > Settings > Agent access). Write it with mail_draft; '
                 'the owner reads and sends it from Mail.')
 APPROVE_REFUSED = 'Only the owner approves or dismisses suggestions, in Calendar.'
+ATTACHMENT_REFUSED = 'Agents read mail as text; attachments open in Mail for the owner.'
 
 
 class AccessRefused(Exception):
@@ -171,6 +174,8 @@ class AgentAccess:
         must become a pending suggestion instead of being applied; None to go ahead."""
         if not is_agent(caller):
             return None
+        if tool == 'mail_attachment':
+            raise AccessRefused(403, 'owner_only', ATTACHMENT_REFUSED)
         if tool in MAIL_TOOLS:
             need = MAIL_TOOLS[tool]
             if need is None:
@@ -193,7 +198,7 @@ class AgentAccess:
         return None
 
     def visible_tools(self, caller, names):
-        """Tools listed to this caller: agents never see mail_send or the owner's approve / dismiss."""
+        """Tools listed to this caller: agents never see mail_send, mail_attachment or the owner's approve / dismiss."""
         return [n for n in names if not (is_agent(caller) and n in OWNER_ONLY)]
 
     def gog_flags(self, caller, root):

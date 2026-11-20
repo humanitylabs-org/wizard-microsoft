@@ -38,6 +38,9 @@ class FakeGraph:
                                'end': {'dateTime': '2026-11-03T02:15:00.0000000', 'timeZone': 'UTC'}, 'responseStatus': {'response': 'notResponded'},
                                'organizer': {'emailAddress': {'address': 'boss@example.com'}}, 'attendees': []}}
         self.sent, self.requests = [], []
+        self.attachments = {'AAMk1': [{'@odata.type': '#microsoft.graph.fileAttachment', 'id': 'AAMkATT1=', 'name': 'menu.pdf',
+                                       'contentType': 'application/pdf', 'size': 1234, 'isInline': False, 'contentId': None,
+                                       'contentBytes': 'JVBERi0xLjQK'}]}
 
     def handle(self, method, url, body=None, headers=None):
         u = urllib.parse.urlsplit(url)
@@ -75,8 +78,18 @@ class FakeGraph:
             if method == 'PATCH':
                 self.messages[mid].update(body)
                 return 200, self.messages[mid]
-        if p.startswith('/me/messages/') and p.endswith('/attachments'):
-            return 200, {'value': [{'name': 'menu.pdf', 'contentType': 'application/pdf', 'size': 1234}]}
+        if p.startswith('/me/messages/') and '/attachments' in p and method == 'GET':
+            # Like Graph: $select picks the fields (contentBytes only on a single file without $select).
+            files = self.attachments.get(urllib.parse.unquote(parts[3]), [])
+            def picked(a):
+                keep = set(q['$select'].split(',')) | {'@odata.type'} if '$select' in q else None
+                return {k: v for k, v in a.items() if keep is None or k in keep}
+            if p.endswith('/attachments'):
+                return 200, {'value': [{k: v for k, v in picked(a).items() if k != 'contentBytes'} for a in files]}
+            found = next((a for a in files if a['id'] == urllib.parse.unquote(parts[5])), None)
+            if not found:
+                return 404, {'error': {'code': 'ErrorItemNotFound', 'message': 'The specified object was not found in the store.'}}
+            return 200, picked(found)
         if p.startswith('/me/messages/') and p.endswith('/createReply'):
             original = self.messages[urllib.parse.unquote(parts[3])]
             mid = f'DRAFT{len(self.messages)}'
@@ -728,7 +741,10 @@ class HttpTests(unittest.TestCase):
                                  'calendar_suggestions'})
         status, value, _ = self.send('POST', '/v1/mail_search', {})
         self.assertEqual(value['error']['code'], 'not_connected')
-        self.assertEqual(self.send('GET', '/v1/status')[1]['contract'], 'wizard.mail-calendar/1')
+        status_view = self.send('GET', '/v1/status')[1]
+        self.assertEqual(status_view['contract'], 'wizard.mail-calendar/1')
+        self.assertNotIn('mail_attachment', status_view['tools'])  # owner only (contract 1.6)
+        self.assertIn('mail_get', status_view['tools'])
 
 
     def test_agents_cannot_send_and_only_the_owner_sets_the_level(self):
@@ -747,6 +763,16 @@ class HttpTests(unittest.TestCase):
                 self.assertEqual((status, value['error']['code']), (403, 'agent_send_refused'), headers)
             status, value, _ = self.send('POST', '/v1/mail_send', {'draft_id': 'd1'}, {'X-Wizard-Grant': token})
             self.assertNotEqual(value['error']['code'], 'agent_send_refused')
+            # mail_attachment (contract 1.6): the owner's, through Mail's grant; agents read mail as text.
+            pick = {'id': 'AAMk1', 'part': 'AAMkATT1='}
+            for headers in ({}, {'X-Wizard-Agent': 'wizard-mail'}, {'X-Wizard-Grant': 'gateway-grant-token-123'}):
+                status, value, _ = self.send('POST', '/v1/mail_attachment', pick, headers)
+                self.assertEqual((status, value['error']['code']), (403, 'owner_only'), headers)
+                status, value, _ = self.send('POST', '/mcp', {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
+                                                              'params': {'name': 'mail_attachment', 'arguments': pick}}, headers)
+                self.assertEqual(value['result']['structuredContent']['error']['code'], 'owner_only', headers)
+            status, value, _ = self.send('POST', '/v1/mail_attachment', pick, {'X-Wizard-Grant': token})
+            self.assertEqual((status, value['error']['code']), (409, 'not_connected'))  # past the agent check
             owner = self.owner()
             status, value, _ = owner('GET', '/api/mail-settings')
             self.assertEqual((status, value['agent_access']['mail']), (200, 'draft_only'))
