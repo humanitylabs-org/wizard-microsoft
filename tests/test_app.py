@@ -3,6 +3,7 @@ The fakes answer with the shapes in docs.composio.dev (v3.1) and learn.microsoft
 import http.client
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
@@ -801,6 +802,54 @@ class HttpTests(unittest.TestCase):
             owner('POST', '/api/agent-access', {'calendar': 'suggest_only'})
         finally:
             grants.unlink()
+
+
+    def test_agent_access_panel_for_connected_accounts(self):
+        # wizard-microsoft#10: Connected accounts' Agent access screen reads and sets this app's levels; kept only here.
+        old = os.environ.get('WIZARD_SWITCHES_DIR')
+        os.environ['WIZARD_SWITCHES_DIR'] = self.dir
+        host, box = 'box.example:8444', 'https://box.example:8444'
+        who = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Agent-Access': '1', 'Sec-Fetch-Site': 'same-origin'}
+        switch = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1', 'Origin': box}
+        get = lambda headers: self.send('GET', '/api/panel/agent-access', None, headers, host)
+        try:
+            self.assertEqual(get(who)[0], 404)  # switch off
+            self.assertEqual(self.send('POST', '/api/panel/agent-access', {'mail': 'read_only'}, {**who, 'Origin': box}, host)[0], 404)
+            status, doc, _ = self.send('GET', '/api/switches', None, switch, host)
+            self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [('agent-access-panel', False, False)])
+            self.assertEqual(self.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': True}, switch, host)[0], 200)
+            self.app.service.state['accounts']['acct-panel1'] = {'id': 'acct-panel1', 'email': 'me@outlook.com', 'label': '',
+                                                                 'status': 'active', 'via': 'composio', 'services': ['mail']}
+            status, doc, _ = get(who)
+            self.assertEqual(status, 200, doc)
+            self.assertEqual(doc['accounts'], [{'name': 'me@outlook.com'}])
+            self.assertEqual((doc['agent_access']['mail'], doc['agent_access']['calendar'], doc['applies_to']),
+                             ('draft_only', 'suggest_only', 'every_agent'))
+            self.assertNotIn('token', json.dumps(doc))
+            # Set there -> changed here (the level the MCP enforces).
+            status, doc, _ = self.send('POST', '/api/panel/agent-access', {'mail': 'read_only', 'calendar': 'can_edit'},
+                                       {**who, 'Origin': box}, host)
+            self.assertEqual((status, doc['agent_access']['mail'], doc['agent_access']['calendar']), (200, 'read_only', 'can_edit'))
+            self.assertEqual((self.app.service.access.level(), self.app.service.access.calendar_level()), ('read_only', 'can_edit'))
+            # Set here (Mail / Calendar > Settings) -> shown there.
+            self.app.service.set_agent_access({'mail': 'no_access'})
+            self.assertEqual(get(who)[1]['agent_access']['mail'], 'no_access')
+            # Refused: no header, a stranger, a bearer, a cross-site fetch, another site, a bad level, unknown keys.
+            self.assertEqual(get({**who, 'X-Wizard-Agent-Access': ''})[0], 403)
+            self.assertEqual(get({**who, 'Tailscale-User-Login': 'guest@example.com'})[0], 401)
+            self.assertEqual(get({**who, 'Authorization': 'Bearer x'})[0], 403)
+            self.assertEqual(get({**who, 'Sec-Fetch-Site': 'cross-site'})[0], 403)
+            for body, origin in (({'mail': 'draft_only'}, 'https://evil.example'), ({'mail': 'send'}, box), ({'grants': 1}, box)):
+                self.assertIn(self.send('POST', '/api/panel/agent-access', body, {**who, 'Origin': origin}, host)[0], (400, 403))
+            self.assertEqual(self.app.service.access.level(), 'no_access')
+        finally:
+            self.app.service.state['accounts'].pop('acct-panel1', None)
+            self.app.service.set_agent_access({'mail': 'draft_only', 'calendar': 'suggest_only'})
+            self.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': False}, switch, host)
+            if old is None:
+                os.environ.pop('WIZARD_SWITCHES_DIR', None)
+            else:
+                os.environ['WIZARD_SWITCHES_DIR'] = old
 
 
 if __name__ == '__main__':

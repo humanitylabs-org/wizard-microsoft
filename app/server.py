@@ -23,6 +23,25 @@ ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
 VERSION = '0.4.0'
+# Connected accounts' Agent access screen (wizard-microsoft#10, switch agent-access-panel): an owner page on the same box
+# origin reads and sets this app's agent levels here. Nothing is copied there; this app stays the only store.
+PANEL_SWITCH = 'agent-access-panel'
+PANEL_PATH = '/api/panel/agent-access'
+
+
+def panel_doc(app):
+    """Names of the Microsoft accounts connected here (no tokens, no services) and the agent levels, which apply to
+    every agent alike."""
+    settings = app.service.mail_settings()
+    names = []
+    for a in settings['accounts']:
+        name = a.get('email') or a.get('label') or 'Microsoft account'
+        if name not in names:
+            names.append(name)
+    return {'app': APP_ID, 'name': 'Microsoft', 'accounts': [{'name': n} for n in names], 'applies_to': 'every_agent',
+            'agent_access': settings['agent_access'], 'kept_by': APP_ID}
+
+
 ASSETS = {'index.html', 'app.js', 'styles.css', 'boot.js', 'wizard-tokens.css', 'wizard-ui.css', 'wizard-sheet.js', 'standalone.css', 'close.js', 'signin.js'}
 def out_origin(trusted, host, own):
     """The same box on another of its trusted ports. Wizard keeps links to its own origin inside Wizard, so the
@@ -285,6 +304,19 @@ def handler_for(app):
                 raise Problem(403, 'origin_rejected', 'Open this app from your Wizard.')
             return origin
 
+        def panel_owner(self):
+            # Connected accounts' Agent access screen (wizard-microsoft#10): the owner (Tailscale Serve login or owner
+            # token) from a page on this box's origin, with `X-Wizard-Agent-Access: 1` (a custom header, so no other
+            # site can send it). No session: the screen is another app's page. Off unless the switch is on.
+            if not switch_on(PANEL_SWITCH):
+                raise Problem(404, 'not_found', 'Not found.')
+            if self.headers.get('X-Wizard-Agent-Access') != '1':
+                raise Problem(403, 'owner_only', 'Only this Wizard\'s owner can see or change agent access.')
+            host = self.owner()
+            if (self.headers.get('Sec-Fetch-Site') or 'same-origin').lower() != 'same-origin':
+                raise Problem(403, 'origin_rejected', 'Open this from your Wizard.')
+            return host
+
         def session(self, csrf=False):
             return app.sessions.check(read_cookie(self.headers.get('Cookie'), 'wm_session'), self.headers.get('X-CSRF-Token', '') if csrf else None)
 
@@ -385,6 +417,9 @@ def handler_for(app):
                         who = (view.get('result') or {}).get('email') or 'Your account'
                         return self.send_done('Connected', f'{who} is connected. This window closes by itself.', True)
                     return self.send_done('Not connected', (view.get('error') or {}).get('message') or 'Start again from Wizard.', True)
+                if path == PANEL_PATH:
+                    self.panel_owner()
+                    return self.send_json(200, panel_doc(app))
                 if path.startswith('/api/'):
                     host = self.owner()
                     session = self.session()
@@ -437,6 +472,14 @@ def handler_for(app):
                         raise Problem(404, 'not_found', 'Not found.')
                     limit = MAX_MAIL_BODY if local.group(1) == 'mail_draft' else MAX_BODY
                     return self.send_json(200, app.service.call_tool(caller, local.group(1), self.body(limit)))
+                if path == PANEL_PATH:
+                    host = self.panel_owner()
+                    self.same_origin_write(host)
+                    body = self.body()
+                    if not body.keys() or not set(body) <= {'mail', 'calendar'}:
+                        raise Problem(400, 'invalid_body', 'Send {"mail": <level>} and/or {"calendar": <level>}.')
+                    app.service.set_agent_access(body)
+                    return self.send_json(200, panel_doc(app))
                 host = self.owner()
                 origin = self.same_origin_write(host)
                 if path == '/api/session':
@@ -515,7 +558,13 @@ import threading as _sw_threading
 from pathlib import Path as _SwPath
 from urllib.parse import urlsplit as _sw_urlsplit
 
-SWITCHES = []
+SWITCHES = [
+    {'id': 'agent-access-panel', 'name': 'Agent access in Connected accounts',
+     'description': 'Connected accounts > Agent access lists the Microsoft accounts connected here and shows and changes '
+                    'what agents may do with your mail and calendar. The level is still kept and enforced here only; a '
+                    'change there is the same as a change in Mail or Calendar > Settings > Agent access.',
+     'default': False, 'issues': ['humanitylabs-org/wizard-microsoft#10']},
+]
 _SW_CONTRACT = 'wizard.app-switches/1'
 _SW_ROUTE = _sw_re.compile(r'(?:/[a-z0-9][a-z0-9-]{0,62})?/api/switches/?')
 _SW_LOCAL = {'localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'}
