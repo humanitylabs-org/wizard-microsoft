@@ -112,6 +112,9 @@ class Store:
 
 # ---------- HTTP to Microsoft ----------
 
+MAX_ANSWER = 40_000_000  # one 25 MB attachment as base64 in JSON (mail_attachment, contract 1.6) is ~34 MB
+
+
 class Http:
     """urllib to Microsoft's login and Graph hosts only; no redirects, no environment proxies."""
     HOSTS = {'login.microsoftonline.com', 'graph.microsoft.com'}
@@ -140,12 +143,14 @@ class Http:
         request = urllib.request.Request(url, data=data, method=method, headers=h)
         try:
             with self.opener.open(request, timeout=25) as response:
-                status, raw = response.status, response.read(8_000_001)
+                status, raw = response.status, response.read(MAX_ANSWER + 1)
         except urllib.error.HTTPError as error:
             status, raw = error.code, error.read(65536)
             error.close()
         except (urllib.error.URLError, TimeoutError, OSError):
             raise graph.GraphError('provider_unavailable', 502, 'Could not reach Microsoft.') from None
+        if len(raw) > MAX_ANSWER:
+            raise graph.GraphError('attachment_too_big', 413, 'Microsoft\'s answer is too big to pass on.')
         try:
             payload = json.loads(raw) if raw else {}
         except ValueError:
