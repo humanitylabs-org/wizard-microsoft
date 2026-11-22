@@ -23,9 +23,9 @@ ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
 VERSION = '0.4.1'
-# Connected accounts' Agent access screen (wizard-microsoft#10, switch agent-access-panel): an owner page on the same box
-# origin reads and sets this app's agent levels here. Nothing is copied there; this app stays the only store.
-PANEL_SWITCH = 'agent-access-panel'
+# Connected accounts' Agent access screen (wizard-microsoft#10; on for everyone, its agent-access-panel switch was
+# removed after show-and-tell): an owner page on the same box origin reads and sets this app's agent levels here.
+# Nothing is copied there; this app stays the only store.
 PANEL_PATH = '/api/panel/agent-access'
 
 
@@ -307,9 +307,7 @@ def handler_for(app):
         def panel_owner(self):
             # Connected accounts' Agent access screen (wizard-microsoft#10): the owner (Tailscale Serve login or owner
             # token) from a page on this box's origin, with `X-Wizard-Agent-Access: 1` (a custom header, so no other
-            # site can send it). No session: the screen is another app's page. Off unless the switch is on.
-            if not switch_on(PANEL_SWITCH):
-                raise Problem(404, 'not_found', 'Not found.')
+            # site can send it). No session: the screen is another app's page.
             if self.headers.get('X-Wizard-Agent-Access') != '1':
                 raise Problem(403, 'owner_only', 'Only this Wizard\'s owner can see or change agent access.')
             host = self.owner()
@@ -558,13 +556,9 @@ import threading as _sw_threading
 from pathlib import Path as _SwPath
 from urllib.parse import urlsplit as _sw_urlsplit
 
-SWITCHES = [
-    {'id': 'agent-access-panel', 'name': 'Agent access in Connected accounts',
-     'description': 'Connected accounts > Agent access lists the Microsoft accounts connected here and shows and changes '
-                    'what agents may do with your mail and calendar. The level is still kept and enforced here only; a '
-                    'change there is the same as a change in Mail or Calendar > Settings > Agent access.',
-     'default': False, 'issues': ['humanitylabs-org/wizard-microsoft#10']},
-]
+SWITCHES = []
+# Switches removed after show-and-tell (now always on); a saved value for them is cleared at startup.
+_SW_RETIRED = ('agent-access-panel',)
 _SW_CONTRACT = 'wizard.app-switches/1'
 _SW_ROUTE = _sw_re.compile(r'(?:/[a-z0-9][a-z0-9-]{0,62})?/api/switches/?')
 _SW_LOCAL = {'localhost', '127.0.0.1', '::1', '[::1]', '0.0.0.0'}
@@ -581,6 +575,20 @@ def _sw_saved():
     except (OSError, ValueError):
         return {}
     return saved if isinstance(saved, dict) else {}
+
+
+def _sw_prune_retired():
+    try:
+        f = _sw_file()
+        saved = _sw_json.loads(f.read_text())
+        if not isinstance(saved, dict) or not any(k in saved for k in _SW_RETIRED):
+            return
+        with _sw_lock:
+            tmp = f.with_name(f.name + '.tmp')
+            tmp.write_text(_sw_json.dumps({k: v for k, v in saved.items() if k not in _SW_RETIRED}))
+            _sw_os.replace(tmp, f)
+    except (OSError, ValueError):
+        pass
 
 
 def switches_doc():
@@ -696,5 +704,6 @@ def wizard_switches_install(handler_cls):
 if __name__ == '__main__':
     config = Config()
     wait_for_storage(config.data_dir)
+    _sw_prune_retired()
     server, _ = serve(config)
     server.serve_forever()
