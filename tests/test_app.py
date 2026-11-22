@@ -813,11 +813,14 @@ class HttpTests(unittest.TestCase):
         switch = {'Tailscale-User-Login': 'owner@example.com', 'X-Wizard-Switch': '1', 'Origin': box}
         get = lambda headers: self.send('GET', '/api/panel/agent-access', None, headers, host)
         try:
-            self.assertEqual(get(who)[0], 404)  # switch off
-            self.assertEqual(self.send('POST', '/api/panel/agent-access', {'mail': 'read_only'}, {**who, 'Origin': box}, host)[0], 404)
+            # On for everyone: the agent-access-panel switch is gone, and a value saved for it is cleared at startup.
             status, doc, _ = self.send('GET', '/api/switches', None, switch, host)
-            self.assertEqual([(x['id'], x['default'], x['on']) for x in doc['switches']], [('agent-access-panel', False, False)])
-            self.assertEqual(self.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': True}, switch, host)[0], 200)
+            self.assertEqual((status, doc['switches']), (200, []))
+            saved = Path(self.dir) / 'switches.json'
+            saved.write_text(json.dumps({'agent-access-panel': False, 'other': True}))
+            server._sw_prune_retired()
+            self.assertEqual(json.loads(saved.read_text()), {'other': True})
+            self.assertEqual(get(who)[0], 200)  # works whatever was saved
             self.app.service.state['accounts']['acct-panel1'] = {'id': 'acct-panel1', 'email': 'me@outlook.com', 'label': '',
                                                                  'status': 'active', 'via': 'composio', 'services': ['mail']}
             status, doc, _ = get(who)
@@ -845,7 +848,7 @@ class HttpTests(unittest.TestCase):
         finally:
             self.app.service.state['accounts'].pop('acct-panel1', None)
             self.app.service.set_agent_access({'mail': 'draft_only', 'calendar': 'suggest_only'})
-            self.send('POST', '/api/switches', {'id': 'agent-access-panel', 'on': False}, switch, host)
+            (Path(self.dir) / 'switches.json').unlink(missing_ok=True)
             if old is None:
                 os.environ.pop('WIZARD_SWITCHES_DIR', None)
             else:
