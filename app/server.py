@@ -22,7 +22,7 @@ from agent_access import AppGrants, SUGGESTION_TOOLS, SUGGESTION_MCP_TOOLS  # no
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / 'web'
 APP_ID = 'wizard-microsoft'
-VERSION = '0.4.1'
+VERSION = '0.4.2'
 # Connected accounts' Agent access screen (wizard-microsoft#10; on for everyone, its agent-access-panel switch was
 # removed after show-and-tell): an owner page on the same box origin reads and sets this app's agent levels here.
 # Nothing is copied there; this app stays the only store.
